@@ -135,10 +135,25 @@ class TradingBot:
         """Initialize Telegram client connection."""
         telegram = self._settings.telegram
         
-        # Determine session path - check parent directory first (for Docker volume mount)
-        session_path = Path(__file__).parent.parent / telegram.session_name
-        if not session_path.with_suffix(".session").exists():
-            session_path = Path(telegram.session_name)
+        # Determine session path
+        # Priority: 1) Explicit SESSION_FILE env var, 2) /app/data/ for containers, 3) Parent dir, 4) Current dir
+        import os
+        session_file_env = os.getenv("SESSION_FILE")
+        
+        if session_file_env:
+            # Use explicit path from environment variable
+            session_path = Path(session_file_env)
+            # Remove .session extension if provided
+            if session_path.suffix == ".session":
+                session_path = session_path.with_suffix("")
+        elif Path("/app/data").exists():
+            # Running in container - use writable data directory
+            session_path = Path("/app/data") / telegram.session_name
+        else:
+            # Check parent directory first (for local Docker volume mount)
+            session_path = Path(__file__).parent.parent / telegram.session_name
+            if not session_path.with_suffix(".session").exists():
+                session_path = Path(telegram.session_name)
         
         logger.debug(f"Using session path: {session_path}")
         

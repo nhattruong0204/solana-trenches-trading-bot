@@ -39,7 +39,8 @@ ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     PYTHONPATH=/app \
     TZ=UTC \
-    LOG_FILE=/app/data/trading_bot.log
+    LOG_FILE=/app/data/trading_bot.log \
+    SESSION_FILE=/app/data/wallet_tracker_session
 
 # Create non-root user for security
 RUN groupadd --gid 1000 botuser && \

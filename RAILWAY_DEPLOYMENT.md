@@ -1,5 +1,22 @@
 # Railway Deployment Guide
 
+## ⚠️ Important Limitations
+
+**Railway Free Tier has limitations that make it difficult to run this Telegram bot:**
+
+1. **No Persistent Storage** - Session files are lost on restart
+2. **No Interactive Auth** - Can't enter phone verification codes
+3. **Read-only Filesystem** - Limited writable directories
+
+**Recommended Alternatives:**
+- **Docker Compose** (local) - See [DOCKER_GUIDE.md](DOCKER_GUIDE.md) ✅ Best option
+- **VPS** (DigitalOcean/Linode) - $5-6/month ✅ Production-ready
+- **Fly.io** with volumes - $0-5/month ⚠️ Requires configuration
+
+**Continue only if you understand these limitations.**
+
+---
+
 ## Quick Deployment to Railway
 
 This guide shows how to deploy the Solana Trading Bot to Railway.app.
@@ -39,6 +56,7 @@ GMGN_BOT=GMGN_sol_bot
 # File Paths (Railway-specific)
 STATE_FILE=/app/data/trading_state.json
 LOG_FILE=/app/data/trading_bot.log
+SESSION_FILE=/app/data/wallet_tracker_session
 ```
 
 **How to get Telegram API credentials:**
@@ -165,23 +183,52 @@ If you see `PermissionError: [Errno 13] Permission denied: '/app/trading_bot.log
 
 Verify your `LOG_FILE` is set to `/app/data/trading_bot.log` in Railway variables.
 
-#### Session File Not Found
+#### Session File Not Found (CRITICAL ISSUE)
 
 ```
-FileNotFoundError: wallet_tracker_session.session
+sqlite3.OperationalError: unable to open database file
 ```
 
-**Solution**: Generate the session file locally first:
+**This is the most common Railway deployment issue!**
 
-```bash
-python -c "
-from telethon import TelegramClient
-client = TelegramClient('wallet_tracker_session', YOUR_API_ID, 'YOUR_API_HASH')
-client.start()
+The Telegram session file must be generated **locally first**, then the bot needs authentication.
+
+⚠️ **Railway Limitation**: Railway doesn't support interactive authentication (phone code verification).
+
+**Two solutions:**
+
+**Solution A: Use String Session (Recommended for Railway)**
+
+1. Generate a string session locally:
+   ```bash
+   python -c "
+from telethon.sync import TelegramClient
+api_id = YOUR_API_ID
+api_hash = 'YOUR_API_HASH'
+with TelegramClient('temp_session', api_id, api_hash) as client:
+    print('String session:', client.session.save())
 "
-```
+   ```
 
-Then upload using Railway CLI (Option A above).
+2. In Railway, add environment variable:
+   ```
+   TELEGRAM_SESSION_STRING=<your_string_session>
+   ```
+
+3. Update code to use string session (requires code modification)
+
+**Solution B: Pre-authenticate Session File (Not recommended for Railway)**
+
+This requires uploading the session file, which Railway doesn't support well on free tier.
+
+**Solution C: Use Different Platform (Easiest)**
+
+For Telegram bots requiring session files, consider:
+- **VPS** (DigitalOcean, Linode) - $5-6/month
+- **Docker on local machine** - Free
+- **Fly.io** with persistent volumes
+
+See [DOCKER_GUIDE.md](DOCKER_GUIDE.md) for Docker setup.
 
 #### Container Crashes on Start
 
