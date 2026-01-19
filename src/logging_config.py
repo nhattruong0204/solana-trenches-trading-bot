@@ -96,18 +96,27 @@ def setup_logging(
     
     # File handler with rotation
     if log_file:
-        log_path = Path(log_file)
-        log_path.parent.mkdir(parents=True, exist_ok=True)
-        
-        file_handler = RotatingFileHandler(
-            filename=str(log_path),
-            maxBytes=LOG_MAX_BYTES,
-            backupCount=LOG_BACKUP_COUNT,
-            encoding="utf-8",
-        )
-        file_handler.setLevel(log_level)
-        file_handler.setFormatter(plain_formatter)
-        root_logger.addHandler(file_handler)
+        try:
+            log_path = Path(log_file)
+            log_path.parent.mkdir(parents=True, exist_ok=True)
+            
+            file_handler = RotatingFileHandler(
+                filename=str(log_path),
+                maxBytes=LOG_MAX_BYTES,
+                backupCount=LOG_BACKUP_COUNT,
+                encoding="utf-8",
+            )
+            file_handler.setLevel(log_level)
+            file_handler.setFormatter(plain_formatter)
+            root_logger.addHandler(file_handler)
+        except (PermissionError, OSError) as e:
+            # If file logging fails (e.g., in read-only container),
+            # continue with console logging only
+            if enable_console:
+                root_logger.warning(
+                    f"Failed to create log file {log_file}: {e}. "
+                    "Continuing with console logging only."
+                )
     
     # Suppress noisy third-party loggers
     logging.getLogger("telethon").setLevel(logging.WARNING)

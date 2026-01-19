@@ -38,7 +38,8 @@ LABEL description="Solana Auto Trading Bot"
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     PYTHONPATH=/app \
-    TZ=UTC
+    TZ=UTC \
+    LOG_FILE=/app/data/trading_bot.log
 
 # Create non-root user for security
 RUN groupadd --gid 1000 botuser && \

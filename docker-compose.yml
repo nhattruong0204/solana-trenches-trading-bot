@@ -14,10 +14,8 @@ services:
     
     # Mount volumes for persistence
     volumes:
-      # State file (created by bot)
-      - ./data/trading_state.json:/app/trading_state.json
-      # Log file
-      - ./data/trading_bot.log:/app/trading_bot.log
+      # Data directory for state and logs
+      - ./data:/app/data
       # Session file (read-only, must exist before starting)
       - ./wallet_tracker_session.session:/app/wallet_tracker_session.session:ro
     
@@ -28,8 +26,8 @@ services:
     # Override environment variables if needed
     environment:
       - TELEGRAM_SESSION_NAME=wallet_tracker_session
-      - STATE_FILE=/app/trading_state.json
-      - LOG_FILE=/app/trading_bot.log
+      - STATE_FILE=/app/data/trading_state.json
+      - LOG_FILE=/app/data/trading_bot.log
     
     # Command line arguments (optional)
     # command: ["--verbose"]

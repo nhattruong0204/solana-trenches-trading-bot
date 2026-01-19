@@ -185,7 +185,26 @@ async def run_bot(args: argparse.Namespace) -> int:
     """
     # Setup logging
     log_level = logging.DEBUG if args.verbose else (logging.WARNING if args.quiet else logging.INFO)
-    log_file = args.log_file or Path("trading_bot.log")
+    
+    # Determine log file path
+    # Priority: CLI arg > LOG_FILE env var > default location
+    if args.log_file:
+        log_file = args.log_file
+    else:
+        import os
+        log_file_env = os.getenv("LOG_FILE")
+        if log_file_env:
+            log_file = Path(log_file_env)
+        elif Path("/app/data").exists() and os.access("/app/data", os.W_OK):
+            # Running in container with writable data directory
+            log_file = Path("/app/data/trading_bot.log")
+        elif os.access(".", os.W_OK):
+            # Current directory is writable
+            log_file = Path("trading_bot.log")
+        else:
+            # No writable location found, disable file logging
+            log_file = None
+    
     setup_logging(log_file=log_file, log_level=log_level)
     
     logger = logging.getLogger(__name__)
