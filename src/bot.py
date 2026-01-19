@@ -6,6 +6,7 @@ This module contains the core bot class that ties together all components:
 - Signal parsing
 - Trade execution
 - State management
+- Remote control via Telegram Bot
 """
 
 from __future__ import annotations
@@ -16,7 +17,7 @@ import signal
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, AsyncIterator, Optional
+from typing import Any, AsyncIterator, Optional, TYPE_CHECKING
 
 from telethon import TelegramClient, events
 from telethon.tl.types import Message, Channel
@@ -38,6 +39,9 @@ from src.parsers import MessageParser
 from src.state import TradingState
 from src.trader import GMGNTrader
 
+if TYPE_CHECKING:
+    from src.notification_bot import NotificationBot
+
 logger = logging.getLogger(__name__)
 
 
@@ -50,6 +54,7 @@ class TradingBot:
     - Monitors the signal channel for buy signals and profit alerts
     - Executes trades via the GMGN bot
     - Manages position state and persistence
+    - Provides remote control via Telegram
     
     Usage:
         settings = Settings()
@@ -69,6 +74,7 @@ class TradingBot:
         self._trader: Optional[GMGNTrader] = None
         self._channel_entity: Optional[Channel] = None
         self._state: Optional[TradingState] = None
+        self._notification_bot: Optional["NotificationBot"] = None
         self._parser = MessageParser()
         self._running = False
         self._shutdown_event = asyncio.Event()
@@ -128,6 +134,9 @@ class TradingBot:
         
         # Get channel entity
         await self._init_channel()
+        
+        # Initialize notification bot for remote management
+        await self._init_notification_bot()
         
         logger.info("✅ Trading bot initialized successfully")
     
@@ -204,6 +213,41 @@ class TradingBot:
         except Exception as e:
             raise ChannelNotFoundError(self._settings.signal_channel) from e
     
+    async def _init_notification_bot(self) -> None:
+        """Initialize Telegram notification bot for remote management."""
+        if not self._settings.controller_enabled:
+            logger.info("Controller disabled, skipping notification bot")
+            return
+        
+        if not self._settings.admin_user_id:
+            logger.warning(
+                "⚠️ ADMIN_USER_ID not set - notifications disabled. "
+                "Set ADMIN_USER_ID in .env to enable."
+            )
+            return
+        
+        if not self._settings.bot_token:
+            logger.warning(
+                "⚠️ BOT_TOKEN not set - notifications disabled. "
+                "Create a bot via @BotFather and set BOT_TOKEN in .env"
+            )
+            return
+        
+        from src.notification_bot import NotificationBot
+        
+        self._notification_bot = NotificationBot(
+            api_id=self._settings.telegram_api_id,
+            api_hash=self._settings.telegram_api_hash,
+            bot_token=self._settings.bot_token,
+            settings=self._settings,
+            admin_user_id=self._settings.admin_user_id,
+            notification_channel=self._settings.notification_channel,
+        )
+        
+        self._notification_bot.set_trading_bot(self)
+        await self._notification_bot.start()
+        logger.info("✅ Notification bot started")
+    
     async def _shutdown(self) -> None:
         """Gracefully shutdown the bot."""
         logger.info("Shutting down trading bot...")
@@ -216,6 +260,13 @@ class TradingBot:
                 self._state.save()
             except Exception as e:
                 logger.error(f"Failed to save state on shutdown: {e}")
+        
+        # Stop notification bot
+        if self._notification_bot:
+            try:
+                await self._notification_bot.stop()
+            except Exception as e:
+                logger.error(f"Error stopping notification bot: {e}")
         
         # Disconnect Telegram
         if self._client:
@@ -332,12 +383,42 @@ class TradingBot:
         Args:
             signal: Parsed buy signal
         """
+        # Use notification bot settings if available, otherwise use static settings
+        if self._notification_bot:
+            buy_amount = self._notification_bot.buy_amount_sol
+            max_positions = self._notification_bot.max_positions
+            trading_paused = self._notification_bot.is_trading_paused
+            wallet_configured = self._notification_bot.is_wallet_configured
+        else:
+            buy_amount = self._settings.trading_buy_amount_sol
+            max_positions = self._settings.trading_max_positions
+            trading_paused = False
+            wallet_configured = True  # Assume configured if no notification bot
+        
         trading = self._settings.trading
         
         logger.info(
             f"📨 Buy signal: ${signal.token_symbol} "
             f"({signal.token_address[:12]}...)"
         )
+        
+        # Notify about the signal
+        if self._notification_bot:
+            await self._notification_bot.notify_signal(
+                token_symbol=signal.token_symbol,
+                token_address=signal.token_address,
+                signal_type="BUY",
+            )
+        
+        # Check if wallet is configured
+        if not wallet_configured:
+            logger.info("Wallet not configured, skipping trade")
+            return
+        
+        # Check if trading is paused
+        if trading_paused:
+            logger.info("Trading paused, skipping")
+            return
         
         # Check if trading is enabled
         if not trading.enabled:
@@ -352,9 +433,9 @@ class TradingBot:
                 return
         
         # Check max positions
-        if self._state and self._state.open_position_count >= trading.max_open_positions:
+        if self._state and self._state.open_position_count >= max_positions:
             logger.warning(
-                f"Max positions ({trading.max_open_positions}) reached, skipping"
+                f"Max positions ({max_positions}) reached, skipping"
             )
             return
         
@@ -365,9 +446,19 @@ class TradingBot:
         
         result = await self._trader.buy_token(
             token_address=signal.token_address,
-            amount_sol=trading.buy_amount_sol,
+            amount_sol=buy_amount,
             symbol=signal.token_symbol,
         )
+        
+        # Notify about trade execution
+        if self._notification_bot:
+            await self._notification_bot.notify_trade(
+                action="BUY",
+                token_symbol=signal.token_symbol,
+                amount_sol=buy_amount,
+                success=result.success,
+                error=result.error if not result.success else None,
+            )
         
         if result.success and self._state:
             # Record position
@@ -375,14 +466,14 @@ class TradingBot:
                 token_address=signal.token_address,
                 token_symbol=signal.token_symbol,
                 buy_time=datetime.now(timezone.utc),
-                buy_amount_sol=trading.buy_amount_sol,
+                buy_amount_sol=buy_amount,
                 signal_msg_id=signal.message_id,
             )
             
             try:
                 await self._state.add_position(
                     position,
-                    max_positions=trading.max_open_positions,
+                    max_positions=max_positions,
                 )
                 logger.info(f"✅ Position opened: ${signal.token_symbol}")
             except (DuplicatePositionError, MaxPositionsReachedError) as e:
@@ -395,6 +486,16 @@ class TradingBot:
         Args:
             alert: Parsed profit alert
         """
+        # Use notification bot settings if available
+        if self._notification_bot:
+            min_multiplier = self._notification_bot.min_multiplier
+            sell_percentage = self._notification_bot.sell_percentage
+            trading_paused = self._notification_bot.is_trading_paused
+        else:
+            min_multiplier = self._settings.trading_min_multiplier
+            sell_percentage = self._settings.trading_sell_percentage
+            trading_paused = False
+        
         trading = self._settings.trading
         
         logger.info(
@@ -415,12 +516,32 @@ class TradingBot:
         # Update multiplier
         position.last_multiplier = alert.multiplier
         
+        # Determine if we should sell
+        will_sell = (
+            alert.multiplier >= min_multiplier and 
+            position.status not in (PositionStatus.PARTIAL_SOLD, PositionStatus.CLOSED) and
+            not trading_paused
+        )
+        
+        # Notify about profit alert
+        if self._notification_bot:
+            await self._notification_bot.notify_profit_alert(
+                token_symbol=position.token_symbol,
+                multiplier=alert.multiplier,
+                will_sell=will_sell,
+            )
+        
         # Check if we should sell
-        if alert.multiplier < trading.min_multiplier_to_sell:
+        if alert.multiplier < min_multiplier:
             logger.debug(
                 f"Multiplier {alert.multiplier}X below threshold "
-                f"{trading.min_multiplier_to_sell}X"
+                f"{min_multiplier}X"
             )
+            return
+        
+        # Check if trading is paused
+        if trading_paused:
+            logger.info("Trading paused, skipping sell")
             return
         
         # Check if already sold at this level
@@ -442,18 +563,29 @@ class TradingBot:
         
         result = await self._trader.sell_token(
             token_address=position.token_address,
-            percentage=trading.sell_percentage,
+            percentage=sell_percentage,
             symbol=position.token_symbol,
         )
+        
+        # Notify about trade execution
+        if self._notification_bot:
+            await self._notification_bot.notify_trade(
+                action="SELL",
+                token_symbol=position.token_symbol,
+                amount_sol=position.buy_amount_sol * (sell_percentage / 100),
+                success=result.success,
+                multiplier=alert.multiplier,
+                error=result.error if not result.success else None,
+            )
         
         if result.success:
             await self._state.mark_partial_sell(
                 token_address=position.token_address,
-                percentage=float(trading.sell_percentage),
+                percentage=float(sell_percentage),
                 multiplier=alert.multiplier,
             )
             logger.info(
-                f"✅ Sold {trading.sell_percentage}% of "
+                f"✅ Sold {sell_percentage}% of "
                 f"${position.token_symbol} at {alert.multiplier}X"
             )
     

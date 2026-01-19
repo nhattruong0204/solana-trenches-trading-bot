@@ -178,6 +178,17 @@ class Settings(BaseSettings):
         alias="GMGN_BOT"
     )
     
+    # Controller configuration (for Telegram remote control)
+    controller_enabled: bool = Field(True, alias="CONTROLLER_ENABLED")
+    admin_user_id: Optional[int] = Field(None, alias="ADMIN_USER_ID")
+    
+    # Bot configuration (for notifications via BotFather bot)
+    bot_token: Optional[str] = Field(None, alias="BOT_TOKEN")
+    notification_channel: Optional[str] = Field(None, alias="NOTIFICATION_CHANNEL")
+    
+    # GMGN Wallet configuration
+    gmgn_wallet: Optional[str] = Field(None, alias="GMGN_WALLET")
+    
     # Path configuration
     state_file: str = Field(DEFAULT_STATE_FILE, alias="STATE_FILE")
     log_file: str = Field(DEFAULT_LOG_FILE, alias="LOG_FILE")
