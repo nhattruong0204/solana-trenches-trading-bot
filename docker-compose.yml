@@ -1,0 +1,73 @@
+# ==============================================================================
+# Solana Trading Bot - Docker Compose Configuration
+# ==============================================================================
+
+services:
+  trading-bot:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: production
+    
+    container_name: solana-trading-bot
+    restart: unless-stopped
+    
+    # Mount volumes for persistence
+    volumes:
+      # State file (created by bot)
+      - ./data/trading_state.json:/app/trading_state.json
+      # Log file
+      - ./data/trading_bot.log:/app/trading_bot.log
+      # Session file (read-only, must exist before starting)
+      - ./wallet_tracker_session.session:/app/wallet_tracker_session.session:ro
+    
+    # Environment file
+    env_file:
+      - .env
+    
+    # Override environment variables if needed
+    environment:
+      - TELEGRAM_SESSION_NAME=wallet_tracker_session
+      - STATE_FILE=/app/trading_state.json
+      - LOG_FILE=/app/trading_bot.log
+    
+    # Command line arguments (optional)
+    # command: ["--verbose"]
+    
+    # Resource limits
+    deploy:
+      resources:
+        limits:
+          cpus: '0.50'
+          memory: 256M
+        reservations:
+          cpus: '0.10'
+          memory: 64M
+    
+    # Logging configuration
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+    
+    # Network configuration
+    networks:
+      - trading-network
+    
+    # Health check
+    healthcheck:
+      test: ["CMD", "python", "-c", "import sys; sys.exit(0)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    
+    # Security options
+    security_opt:
+      - no-new-privileges:true
+    read_only: false
+
+networks:
+  trading-network:
+    driver: bridge

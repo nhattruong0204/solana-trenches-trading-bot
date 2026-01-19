@@ -1,0 +1,59 @@
+# ==============================================================================
+# Solana Trading Bot - Git Ignore
+# ==============================================================================
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.venv/
+venv/
+ENV/
+env/
+.eggs/
+*.egg-info/
+*.egg
+dist/
+build/
+
+# Testing
+.pytest_cache/
+.coverage
+coverage.xml
+htmlcov/
+.tox/
+.nox/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*.sublime-*
+
+# Environment and secrets - NEVER COMMIT THESE
+.env
+*.session
+
+# State and logs
+trading_state.json
+trading_bot.log
+*.log
+data/
+
+# OS
+.DS_Store
+Thumbs.db
+*~
+
+# Type checking
+.mypy_cache/
+.dmypy.json
+dmypy.json
+
+# Temporary files
+*.tmp
+*.bak
+.venv/

@@ -1,0 +1,60 @@
+# ==============================================================================
+# Docker Build Ignore File
+# ==============================================================================
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.venv/
+venv/
+env/
+ENV/
+.eggs/
+*.egg-info/
+*.egg
+dist/
+build/
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+tests/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Git
+.git/
+.gitignore
+
+# Documentation
+*.md
+!README.md
+docs/
+
+# Scripts (not needed in container)
+*.sh
+
+# Environment and secrets
+.env
+.env.*
+!.env.example
+*.session
+
+# State and logs (mounted as volumes)
+trading_state.json
+trading_bot.log
+*.log
+test_output.log
+data/
+
+# OS
+.DS_Store
+Thumbs.db
