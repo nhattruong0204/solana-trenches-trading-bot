@@ -1,0 +1,269 @@
+"""
+Configuration management using Pydantic for validation.
+
+Supports loading from environment variables and .env files
+with full validation and type coercion.
+"""
+
+from __future__ import annotations
+
+import os
+from functools import lru_cache
+from pathlib import Path
+from typing import Optional
+
+from pydantic import BaseModel, Field, field_validator
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+from src.constants import (
+    DEFAULT_BUY_AMOUNT_SOL,
+    DEFAULT_MAX_POSITIONS,
+    DEFAULT_MIN_MULTIPLIER,
+    DEFAULT_SELL_PERCENTAGE,
+    DEFAULT_STATE_FILE,
+    DEFAULT_LOG_FILE,
+    GMGN_BOT_USERNAME,
+    TRENCHES_CHANNEL_USERNAME,
+)
+
+
+class TelegramSettings(BaseModel):
+    """Telegram API configuration."""
+    
+    api_id: int = Field(..., description="Telegram API ID from my.telegram.org")
+    api_hash: str = Field(..., description="Telegram API hash from my.telegram.org")
+    phone: Optional[str] = Field(None, description="Phone number for authentication")
+    session_name: str = Field(
+        "wallet_tracker_session",
+        description="Name of the session file (without extension)"
+    )
+    
+    @field_validator("api_id")
+    @classmethod
+    def validate_api_id(cls, v: int) -> int:
+        if v <= 0:
+            raise ValueError("API ID must be a positive integer")
+        return v
+    
+    @field_validator("api_hash")
+    @classmethod
+    def validate_api_hash(cls, v: str) -> str:
+        if not v or len(v) < 10:
+            raise ValueError("API hash appears to be invalid")
+        return v
+
+
+class TradingSettings(BaseModel):
+    """Trading strategy configuration."""
+    
+    enabled: bool = Field(True, description="Master switch for trading")
+    dry_run: bool = Field(True, description="If True, simulate trades without execution")
+    buy_amount_sol: float = Field(
+        DEFAULT_BUY_AMOUNT_SOL,
+        ge=0.001,
+        le=100.0,
+        description="Amount of SOL to buy per signal"
+    )
+    sell_percentage: int = Field(
+        DEFAULT_SELL_PERCENTAGE,
+        ge=1,
+        le=100,
+        description="Percentage to sell when target is hit"
+    )
+    min_multiplier_to_sell: float = Field(
+        DEFAULT_MIN_MULTIPLIER,
+        ge=1.1,
+        le=100.0,
+        description="Minimum multiplier to trigger sell"
+    )
+    max_open_positions: int = Field(
+        DEFAULT_MAX_POSITIONS,
+        ge=1,
+        le=100,
+        description="Maximum number of concurrent positions"
+    )
+    
+    @field_validator("buy_amount_sol")
+    @classmethod
+    def validate_buy_amount(cls, v: float) -> float:
+        if v < 0.001:
+            raise ValueError("Buy amount must be at least 0.001 SOL")
+        return round(v, 4)
+
+
+class ChannelSettings(BaseModel):
+    """Telegram channel configuration."""
+    
+    signal_channel: str = Field(
+        TRENCHES_CHANNEL_USERNAME,
+        description="Channel username to monitor for signals"
+    )
+    gmgn_bot: str = Field(
+        GMGN_BOT_USERNAME,
+        description="GMGN bot username for trade execution"
+    )
+
+
+class PathSettings(BaseModel):
+    """File path configuration."""
+    
+    state_file: Path = Field(
+        Path(DEFAULT_STATE_FILE),
+        description="Path to state persistence file"
+    )
+    log_file: Path = Field(
+        Path(DEFAULT_LOG_FILE),
+        description="Path to log file"
+    )
+    session_path: Optional[Path] = Field(
+        None,
+        description="Custom path to Telegram session file"
+    )
+
+
+class Settings(BaseSettings):
+    """
+    Main application settings.
+    
+    Configuration is loaded from environment variables with the following prefixes:
+    - TELEGRAM_* for Telegram settings
+    - TRADING_* for trading settings
+    
+    You can also use a .env file in the working directory.
+    """
+    
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        env_file_encoding="utf-8",
+        case_sensitive=False,
+        extra="ignore",
+    )
+    
+    # Telegram configuration (required)
+    telegram_api_id: int = Field(..., alias="TELEGRAM_API_ID")
+    telegram_api_hash: str = Field(..., alias="TELEGRAM_API_HASH")
+    telegram_phone: Optional[str] = Field(None, alias="TELEGRAM_PHONE")
+    telegram_session_name: str = Field(
+        "wallet_tracker_session",
+        alias="TELEGRAM_SESSION_NAME"
+    )
+    
+    # Trading configuration
+    trading_enabled: bool = Field(True, alias="TRADING_ENABLED")
+    trading_dry_run: bool = Field(True, alias="TRADING_DRY_RUN")
+    trading_buy_amount_sol: float = Field(
+        DEFAULT_BUY_AMOUNT_SOL,
+        alias="TRADING_BUY_AMOUNT_SOL"
+    )
+    trading_sell_percentage: int = Field(
+        DEFAULT_SELL_PERCENTAGE,
+        alias="TRADING_SELL_PERCENTAGE"
+    )
+    trading_min_multiplier: float = Field(
+        DEFAULT_MIN_MULTIPLIER,
+        alias="TRADING_MIN_MULTIPLIER"
+    )
+    trading_max_positions: int = Field(
+        DEFAULT_MAX_POSITIONS,
+        alias="TRADING_MAX_POSITIONS"
+    )
+    
+    # Channel configuration
+    signal_channel: str = Field(
+        TRENCHES_CHANNEL_USERNAME,
+        alias="SIGNAL_CHANNEL"
+    )
+    gmgn_bot: str = Field(
+        GMGN_BOT_USERNAME,
+        alias="GMGN_BOT"
+    )
+    
+    # Path configuration
+    state_file: str = Field(DEFAULT_STATE_FILE, alias="STATE_FILE")
+    log_file: str = Field(DEFAULT_LOG_FILE, alias="LOG_FILE")
+    
+    @property
+    def telegram(self) -> TelegramSettings:
+        """Get Telegram settings as a structured object."""
+        return TelegramSettings(
+            api_id=self.telegram_api_id,
+            api_hash=self.telegram_api_hash,
+            phone=self.telegram_phone,
+            session_name=self.telegram_session_name,
+        )
+    
+    @property
+    def trading(self) -> TradingSettings:
+        """Get trading settings as a structured object."""
+        return TradingSettings(
+            enabled=self.trading_enabled,
+            dry_run=self.trading_dry_run,
+            buy_amount_sol=self.trading_buy_amount_sol,
+            sell_percentage=self.trading_sell_percentage,
+            min_multiplier_to_sell=self.trading_min_multiplier,
+            max_open_positions=self.trading_max_positions,
+        )
+    
+    @property
+    def channel(self) -> ChannelSettings:
+        """Get channel settings as a structured object."""
+        return ChannelSettings(
+            signal_channel=self.signal_channel,
+            gmgn_bot=self.gmgn_bot,
+        )
+    
+    @property
+    def paths(self) -> PathSettings:
+        """Get path settings as a structured object."""
+        return PathSettings(
+            state_file=Path(self.state_file),
+            log_file=Path(self.log_file),
+        )
+
+
+@lru_cache
+def get_settings() -> Settings:
+    """
+    Get cached application settings.
+    
+    Settings are loaded once and cached for performance.
+    Use clear_settings_cache() to reload.
+    
+    Returns:
+        Settings: Application settings instance
+        
+    Raises:
+        ValidationError: If required settings are missing or invalid
+    """
+    return Settings()
+
+
+def clear_settings_cache() -> None:
+    """Clear the settings cache to force reload."""
+    get_settings.cache_clear()
+
+
+def validate_environment() -> tuple[bool, list[str]]:
+    """
+    Validate that all required environment variables are set.
+    
+    Returns:
+        Tuple of (is_valid, list of error messages)
+    """
+    errors: list[str] = []
+    
+    required_vars = [
+        ("TELEGRAM_API_ID", "Telegram API ID"),
+        ("TELEGRAM_API_HASH", "Telegram API Hash"),
+    ]
+    
+    for var_name, description in required_vars:
+        if not os.environ.get(var_name):
+            errors.append(f"Missing required environment variable: {var_name} ({description})")
+    
+    # Validate API ID is numeric if present
+    api_id = os.environ.get("TELEGRAM_API_ID", "")
+    if api_id and not api_id.isdigit():
+        errors.append("TELEGRAM_API_ID must be a numeric value")
+    
+    return len(errors) == 0, errors
