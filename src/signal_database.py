@@ -414,12 +414,12 @@ class SignalDatabase:
         # Losers: -100%
         total_pnl = sum(s.pnl_percent for s in signals) / total if total > 0 else 0
         
-        # Get top and worst performers
+        # Get top and worst performers (show 15 each)
         sorted_by_mult = sorted(with_profit, key=lambda s: s.max_multiplier, reverse=True)
-        top_performers = sorted_by_mult[:5]
+        top_performers = sorted_by_mult[:15]
         
         sorted_by_mult_asc = sorted(with_profit, key=lambda s: s.max_multiplier)
-        worst_performers = sorted_by_mult_asc[:5]
+        worst_performers = sorted_by_mult_asc[:15]
         
         # Date range
         timestamps = [s.signal.timestamp for s in signals]
