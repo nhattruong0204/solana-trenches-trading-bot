@@ -5,12 +5,15 @@ This module provides a proper Telegram Bot (via BotFather) for:
 - Sending notifications to channels/groups
 - Remote control commands from admin
 - Wallet setup and configuration
+- PnL tracking and reporting (from PostgreSQL database)
+- Interactive button menu
 """
 
 from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import re
 from datetime import datetime, timezone
 from typing import Any, Optional, TYPE_CHECKING
@@ -18,6 +21,10 @@ from typing import Any, Optional, TYPE_CHECKING
 from telethon import TelegramClient, events
 from telethon.sessions import StringSession
 from telethon.tl.types import User, Channel, Chat
+from telethon.tl.custom import Button
+
+from src.signal_history import SignalHistory
+from src.signal_database import SignalDatabase
 
 if TYPE_CHECKING:
     from src.bot import TradingBot
@@ -42,11 +49,17 @@ class NotificationBot:
     - Send notifications to a channel/group
     - Accept commands from admin users
     - Handle wallet setup on start
+    - Track and report PnL statistics
+    - Interactive button menu
     
     Commands (admin only):
         /start - Welcome and wallet setup
+        /menu - Show interactive button menu
         /status - Bot status
         /positions - Open positions  
+        /pnl - Current positions PnL
+        /signalpnl [1d|7d|30d|all] - Signal PnL statistics
+        /syncsignals - Sync latest signals from channel
         /settings - Current settings
         /setsize <SOL> - Set buy amount
         /setsell <percent> - Set sell percentage
@@ -100,6 +113,43 @@ class NotificationBot:
         
         # Pending wallet setup
         self._awaiting_wallet = False
+        
+        # Awaiting custom days input for signal PnL
+        self._awaiting_custom_days = False
+        
+        # Signal history for PnL tracking (local file-based)
+        self._signal_history = SignalHistory()
+        self._signal_history.load()
+        
+        # Signal database for historical PnL from PostgreSQL
+        self._signal_db: Optional[SignalDatabase] = None
+        db_dsn = self._build_database_dsn()
+        if db_dsn:
+            self._signal_db = SignalDatabase(db_dsn)
+    
+    def _build_database_dsn(self) -> Optional[str]:
+        """Build PostgreSQL DSN from environment variables."""
+        host = os.getenv("POSTGRES_HOST", "localhost")
+        port = os.getenv("POSTGRES_PORT", "5432")
+        user = os.getenv("POSTGRES_USER", "postgres")
+        password = os.getenv("POSTGRES_PASSWORD", "")
+        database = os.getenv("POSTGRES_DATABASE", "wallet_tracker")
+        
+        if not password:
+            logger.warning("POSTGRES_PASSWORD not set, signal database disabled")
+            return None
+        
+        return f"postgresql://{user}:{password}@{host}:{port}/{database}"
+    
+    @property
+    def signal_history(self) -> SignalHistory:
+        """Get signal history tracker."""
+        return self._signal_history
+    
+    @property
+    def signal_db(self) -> Optional[SignalDatabase]:
+        """Get signal database."""
+        return self._signal_db
     
     def set_trading_bot(self, bot: "TradingBot") -> None:
         """Set the trading bot reference."""
@@ -151,6 +201,21 @@ class NotificationBot:
         me = await self._client.get_me()
         logger.info(f"✅ Notification bot started: @{me.username}")
         
+        # Set up bot commands menu (persistent menu next to text input)
+        await self._setup_bot_commands()
+        
+        # Connect to signal database
+        if self._signal_db:
+            if await self._signal_db.connect():
+                counts = await self._signal_db.get_signal_count()
+                logger.info(
+                    f"✅ Signal database connected: "
+                    f"{counts.get('total_signals', 0)} signals, "
+                    f"{counts.get('total_profit_alerts', 0)} alerts"
+                )
+            else:
+                logger.warning("Signal database connection failed, using local tracking only")
+        
         # Resolve notification channel
         if self._notification_channel:
             try:
@@ -171,16 +236,57 @@ class NotificationBot:
             events.NewMessage()
         )
         
+        # Register callback query handler for button clicks
+        self._client.add_event_handler(
+            self._handle_callback,
+            events.CallbackQuery()
+        )
+        
         self._initialized = True
         
         # Send startup message
         await self._send_startup_message()
+    
+    async def _setup_bot_commands(self) -> None:
+        """Set up the bot commands menu (shown next to text input)."""
+        from telethon.tl.functions.bots import SetBotCommandsRequest
+        from telethon.tl.types import BotCommand, BotCommandScopeDefault
+        
+        commands = [
+            BotCommand(command="menu", description="📱 Show interactive menu"),
+            BotCommand(command="status", description="📊 Bot status"),
+            BotCommand(command="positions", description="📈 Open positions"),
+            BotCommand(command="pnl", description="💰 Current PnL"),
+            BotCommand(command="signalpnl", description="📉 Signal PnL (1d/3d/7d/30d/all)"),
+            BotCommand(command="syncsignals", description="🔄 Sync signals from channel"),
+            BotCommand(command="settings", description="⚙️ Current settings"),
+            BotCommand(command="pause", description="⏸️ Pause trading"),
+            BotCommand(command="resume", description="▶️ Resume trading"),
+            BotCommand(command="help", description="❓ Show all commands"),
+        ]
+        
+        try:
+            await self._client(SetBotCommandsRequest(
+                scope=BotCommandScopeDefault(),
+                lang_code="",
+                commands=commands,
+            ))
+            logger.info("✅ Bot commands menu set up")
+        except Exception as e:
+            logger.warning(f"Could not set bot commands: {e}")
     
     async def stop(self) -> None:
         """Stop the bot client."""
         if self._client:
             await self._client.disconnect()
             self._initialized = False
+        
+        # Close signal history HTTP client
+        await self._signal_history.close()
+        
+        # Disconnect from signal database
+        if self._signal_db:
+            await self._signal_db.disconnect()
     
     def _get_entity_name(self) -> str:
         """Get display name of notification channel."""
@@ -348,6 +454,11 @@ class NotificationBot:
             await self._handle_wallet_input(text)
             return
         
+        # Check if awaiting custom days input
+        if self._awaiting_custom_days and not text.startswith("/"):
+            await self._handle_custom_days_input(text)
+            return
+        
         # Handle commands
         if text.startswith("/"):
             await self._handle_command(text)
@@ -379,6 +490,55 @@ class NotificationBot:
         
         logger.info(f"✅ GMGN wallet configured: {address[:8]}...{address[-6:]}")
     
+    async def _prompt_custom_days(self) -> None:
+        """Prompt user to enter custom number of days for signal PnL."""
+        self._awaiting_custom_days = True
+        await self._send_to_admin(
+            "📅 *Enter Custom Day Range*\n\n"
+            "Please enter the number of days for signal PnL analysis:\n\n"
+            "• Enter a number (e.g., `3`, `7`, `14`, `30`, `90`)\n"
+            "• Or type `all` for lifetime\n\n"
+            "_Send /menu to cancel_"
+        )
+    
+    async def _handle_custom_days_input(self, text: str) -> None:
+        """Handle custom days input for signal PnL."""
+        self._awaiting_custom_days = False
+        
+        text = text.strip().lower()
+        
+        if text == "all" or text == "lifetime":
+            await self._cmd_signal_pnl("all")
+            return
+        
+        try:
+            days = int(text)
+            if days <= 0:
+                await self._send_to_admin(
+                    "❌ *Invalid input*\n\n"
+                    "Please enter a positive number of days.\n"
+                    "Use /menu to try again."
+                )
+                return
+            
+            if days > 3650:  # Max 10 years
+                await self._send_to_admin(
+                    "❌ *Too many days*\n\n"
+                    "Maximum allowed is 3650 days (10 years).\n"
+                    "Use /menu to try again."
+                )
+                return
+            
+            # Call signal PnL with custom days
+            await self._cmd_signal_pnl(str(days))
+            
+        except ValueError:
+            await self._send_to_admin(
+                "❌ *Invalid input*\n\n"
+                "Please enter a valid number or `all`.\n"
+                "Use /menu to try again."
+            )
+
     async def _handle_command(self, text: str) -> None:
         """Handle bot commands."""
         parts = text.split(maxsplit=1)
@@ -387,9 +547,13 @@ class NotificationBot:
         
         handlers = {
             "/start": self._cmd_start,
+            "/menu": self._cmd_menu,
             "/help": self._cmd_help,
             "/status": self._cmd_status,
             "/positions": self._cmd_positions,
+            "/pnl": self._cmd_pnl,
+            "/signalpnl": self._cmd_signal_pnl,
+            "/syncsignals": self._cmd_sync_signals,
             "/settings": self._cmd_settings,
             "/setsize": self._cmd_set_size,
             "/setsell": self._cmd_set_sell,
@@ -423,18 +587,120 @@ class NotificationBot:
                 "🤖 *Solana Trading Bot*\n\n"
                 f"• Wallet: `{self._gmgn_wallet[:8]}...{self._gmgn_wallet[-6:]}`\n"
                 f"• Status: `{'Running' if self._bot and self._bot.is_running else 'Stopped'}`\n\n"
-                "Use /help to see all commands."
+                "Use /menu to see interactive menu or /help for commands."
             )
+    
+    def _get_menu_buttons(self) -> list:
+        """Get the main menu buttons."""
+        return [
+            [
+                Button.inline("📊 Status", b"cmd_status"),
+                Button.inline("📈 Positions", b"cmd_positions"),
+            ],
+            [
+                Button.inline("💰 PnL", b"cmd_pnl"),
+                Button.inline("⚙️ Settings", b"cmd_settings"),
+            ],
+            [
+                Button.inline("📉 Signal PnL (All)", b"signalpnl_all"),
+                Button.inline("📉 Signal PnL (Custom)", b"signalpnl_custom"),
+            ],
+            [
+                Button.inline("🔄 Sync Signals", b"cmd_sync_signals"),
+                Button.inline("📊 Stats", b"cmd_stats"),
+            ],
+            [
+                Button.inline("⏸️ Pause", b"cmd_pause"),
+                Button.inline("▶️ Resume", b"cmd_resume"),
+            ],
+            [
+                Button.inline("❓ Help", b"cmd_help"),
+            ],
+        ]
+    
+    async def _cmd_menu(self, args: str) -> None:
+        """Show interactive menu with buttons."""
+        trading_status = "🟢 Running" if not self._trading_paused else "⏸️ Paused"
+        wallet_status = f"`{self._gmgn_wallet[:8]}...`" if self._gmgn_wallet else "❌ Not set"
+        
+        message = (
+            "🤖 *SOLANA TRADING BOT MENU*\n\n"
+            f"• Status: {trading_status}\n"
+            f"• Wallet: {wallet_status}\n"
+            f"• Buy Amount: `{self._buy_amount_sol} SOL`\n"
+            f"• Sell At: `{self._min_multiplier}X`\n"
+            f"• Dry Run: `{'Yes' if self._settings.trading_dry_run else 'No'}`\n\n"
+            "_Select an option below:_"
+        )
+        
+        await self._send_to_admin_with_buttons(message, self._get_menu_buttons())
+    
+    async def _send_to_admin_with_buttons(self, message: str, buttons: list) -> None:
+        """Send message to admin with inline buttons."""
+        if not self._client:
+            return
+        
+        try:
+            await self._client.send_message(
+                self._admin_user_id,
+                message,
+                parse_mode="markdown",
+                buttons=buttons,
+            )
+        except Exception as e:
+            logger.error(f"Failed to send to admin with buttons: {e}")
+    
+    async def _handle_callback(self, event: events.CallbackQuery.Event) -> None:
+        """Handle button callback queries."""
+        sender = await event.get_sender()
+        
+        # Only process callbacks from admin
+        if not sender or sender.id != self._admin_user_id:
+            await event.answer("⚠️ You are not authorized", alert=True)
+            return
+        
+        data = event.data.decode('utf-8')
+        
+        # Acknowledge the callback
+        await event.answer()
+        
+        # Map callback data to handlers
+        callback_handlers = {
+            "cmd_status": lambda: self._cmd_status(""),
+            "cmd_positions": lambda: self._cmd_positions(""),
+            "cmd_pnl": lambda: self._cmd_pnl(""),
+            "cmd_settings": lambda: self._cmd_settings(""),
+            "cmd_stats": lambda: self._cmd_stats(""),
+            "cmd_help": lambda: self._cmd_help(""),
+            "cmd_pause": lambda: self._cmd_pause(""),
+            "cmd_resume": lambda: self._cmd_resume(""),
+            "cmd_sync_signals": lambda: self._cmd_sync_signals(""),
+            "signalpnl_all": lambda: self._cmd_signal_pnl("all"),
+            "signalpnl_custom": lambda: self._prompt_custom_days(),
+            "back_to_menu": lambda: self._cmd_menu(""),
+        }
+        
+        handler = callback_handlers.get(data)
+        if handler:
+            await handler()
+        else:
+            await self._send_to_admin(f"❓ Unknown action: {data}")
     
     async def _cmd_help(self, args: str) -> None:
         """Show help."""
         help_text = (
             "📚 *AVAILABLE COMMANDS*\n\n"
+            "*Menu:*\n"
+            "• /menu - Interactive button menu\n\n"
             "*Status & Monitoring:*\n"
             "• /status - Bot status\n"
             "• /positions - Open positions\n"
-            "• /settings - Current settings\n"
             "• /stats - Trading statistics\n\n"
+            "*PnL Tracking:*\n"
+            "• /pnl - Current positions PnL\n"
+            "• /signalpnl `<days>` - Signal PnL for N days\n"
+            "• /signalpnl `all` - Lifetime signals PnL\n"
+            "• /syncsignals - Sync latest from channel\n\n"
             "*Control:*\n"
             "• /pause - Pause trading\n"
             "• /resume - Resume trading\n\n"
@@ -444,7 +710,7 @@ class NotificationBot:
             "• /setmultiplier `<X>` - Min sell multiplier\n"
             "• /setmax `<count>` - Max positions\n"
             "• /setwallet `<address>` - GMGN wallet\n\n"
-            "_Example: /setsize 0.2_"
+            "_Tip: Use /menu for interactive buttons!_"
         )
         await self._send_to_admin(help_text)
     
@@ -692,3 +958,320 @@ class NotificationBot:
             message += f"\n• Total Invested: `{stats['total_invested_sol']:.4f} SOL`"
         
         await self._send_to_admin(message)
+    
+    async def _cmd_pnl(self, args: str) -> None:
+        """Show PnL for current open positions."""
+        if not self._bot or not self._bot.state:
+            await self._send_to_admin("❌ No position data available")
+            return
+        
+        positions = self._bot.state.open_positions
+        
+        if not positions:
+            await self._send_to_admin("📭 *No open positions*\n\nNo PnL to calculate.")
+            return
+        
+        await self._send_to_admin("⏳ Fetching current prices...")
+        
+        # Update prices for all open positions
+        addresses = list(positions.keys())
+        await self._signal_history.update_prices(addresses)
+        
+        total_invested = 0.0
+        total_current_value = 0.0
+        position_lines = []
+        
+        for addr, pos in positions.items():
+            signal = self._signal_history.signals.get(addr)
+            
+            total_invested += pos.buy_amount_sol
+            
+            if signal and signal.multiplier:
+                mult = signal.multiplier
+                pnl_pct = signal.pnl_percent or 0
+                current_val = pos.buy_amount_sol * mult * (pos.remaining_percentage / 100)
+                total_current_value += current_val
+                
+                emoji = "🟢" if mult >= 1 else "🔴"
+                position_lines.append(
+                    f"{emoji} `${pos.token_symbol}`\n"
+                    f"   Entry: `{signal.entry_price_sol:.10f}` SOL\n"
+                    f"   Current: `{signal.current_price_sol:.10f}` SOL\n"
+                    f"   PnL: `{mult:.2f}X` ({pnl_pct:+.1f}%)\n"
+                    f"   Value: `{current_val:.4f}` SOL"
+                )
+            else:
+                # Use position's last multiplier if no signal history
+                mult = pos.last_multiplier
+                pnl_pct = (mult - 1) * 100
+                current_val = pos.buy_amount_sol * mult * (pos.remaining_percentage / 100)
+                total_current_value += current_val
+                
+                emoji = "🟢" if mult >= 1 else "🔴"
+                position_lines.append(
+                    f"{emoji} `${pos.token_symbol}`\n"
+                    f"   PnL: `{mult:.2f}X` ({pnl_pct:+.1f}%)\n"
+                    f"   Value: `{current_val:.4f}` SOL"
+                )
+        
+        total_pnl_sol = total_current_value - total_invested
+        total_pnl_pct = ((total_current_value / total_invested) - 1) * 100 if total_invested > 0 else 0
+        
+        overall_emoji = "🟢" if total_pnl_sol >= 0 else "🔴"
+        
+        message = (
+            f"💰 *POSITIONS PnL ({len(positions)} open)*\n\n"
+            + "\n\n".join(position_lines)
+            + f"\n\n{'─' * 30}\n"
+            f"{overall_emoji} *TOTAL*\n"
+            f"   Invested: `{total_invested:.4f}` SOL\n"
+            f"   Current: `{total_current_value:.4f}` SOL\n"
+            f"   PnL: `{total_pnl_sol:+.4f}` SOL ({total_pnl_pct:+.1f}%)"
+        )
+        
+        await self._send_to_admin(message)
+    
+    async def _cmd_signal_pnl(self, args: str) -> None:
+        """Show PnL statistics for signals from the channel (from database)."""
+        # Check if database is available
+        if not self._signal_db:
+            await self._send_to_admin(
+                "❌ *Signal database not configured*\n\n"
+                "Set these environment variables:\n"
+                "• `POSTGRES_HOST`\n"
+                "• `POSTGRES_PORT`\n"
+                "• `POSTGRES_USER`\n"
+                "• `POSTGRES_PASSWORD`\n"
+                "• `POSTGRES_DATABASE`"
+            )
+            return
+        
+        # Parse period argument
+        arg = args.strip().lower() if args else "all"
+        
+        # Handle "all" or "lifetime" for all-time stats
+        if arg in ("all", "lifetime"):
+            days = None
+        else:
+            # Try to parse as number of days
+            # Support formats: "7", "7d", "7days"
+            numeric_arg = arg.replace("d", "").replace("days", "").replace("day", "")
+            try:
+                days = int(numeric_arg)
+                if days <= 0:
+                    await self._send_to_admin(
+                        "❌ *Invalid period*\n\n"
+                        "Please enter a positive number of days.\n\n"
+                        "Examples: `/signalpnl 7`, `/signalpnl 30`, `/signalpnl all`"
+                    )
+                    return
+            except ValueError:
+                await self._send_to_admin(
+                    "❌ *Invalid period*\n\n"
+                    "Usage: /signalpnl `<days>` or `/signalpnl all`\n\n"
+                    "Examples:\n"
+                    "• `/signalpnl 7` - Last 7 days\n"
+                    "• `/signalpnl 30` - Last 30 days\n"
+                    "• `/signalpnl all` - All time"
+                )
+                return
+        
+        await self._send_to_admin(f"⏳ Querying signal database...")
+        
+        # Query database for PnL stats
+        stats = await self._signal_db.calculate_pnl_stats(days)
+        
+        if stats.total_signals == 0:
+            await self._send_to_admin(
+                f"📭 *No signals found*\n\n"
+                f"Period: {stats.period_label}\n\n"
+                "Make sure the database has signal data."
+            )
+            return
+        
+        # Build message
+        win_emoji = "🟢" if stats.win_rate >= 50 else "🔴"
+        pnl_emoji = "🟢" if stats.total_pnl_percent >= 0 else "🔴"
+        
+        # Date range
+        date_range = ""
+        if stats.start_date and stats.end_date:
+            date_range = f"📅 `{stats.start_date.strftime('%Y-%m-%d')}` to `{stats.end_date.strftime('%Y-%m-%d')}`\n\n"
+        
+        message = (
+            f"📊 *SIGNAL PnL - {stats.period_label}*\n\n"
+            f"{date_range}"
+            f"📈 *Overview*\n"
+            f"• Total Signals: `{stats.total_signals}`\n"
+            f"• With Profit: `{stats.signals_with_profit}`\n"
+            f"• Reached 2X: `{stats.signals_reached_2x}`\n"
+            f"• Losers: `{stats.losing_signals}`\n"
+            f"• {win_emoji} Win Rate: `{stats.win_rate:.1f}%`\n"
+            f"• Win Rate (2X+): `{stats.win_rate_2x:.1f}%`\n\n"
+            f"💰 *Performance*\n"
+            f"• {pnl_emoji} Avg PnL: `{stats.total_pnl_percent:+.1f}%`\n"
+            f"• Avg Mult: `{stats.avg_multiplier:.2f}X`\n"
+            f"• Best: `{stats.best_multiplier:.2f}X`\n"
+            f"• Worst: `{stats.worst_multiplier:.2f}X`\n"
+        )
+        
+        # Add top performers
+        if stats.top_performers:
+            message += "\n🏆 *Top Performers*\n"
+            for i, s in enumerate(stats.top_performers, 1):
+                mult = s.max_multiplier
+                pnl = s.pnl_percent
+                message += f"{i}. `${s.signal.token_symbol}` - `{mult:.2f}X` ({pnl:+.1f}%)\n"
+        
+        # Add worst performers (from winners only)
+        if stats.worst_performers:
+            message += "\n📉 *Smallest Wins*\n"
+            for i, s in enumerate(stats.worst_performers, 1):
+                mult = s.max_multiplier
+                pnl = s.pnl_percent
+                message += f"{i}. `${s.signal.token_symbol}` - `{mult:.2f}X` ({pnl:+.1f}%)\n"
+        
+        await self._send_to_admin(message)
+    
+    async def _cmd_sync_signals(self, args: str) -> None:
+        """Sync latest signals from the Trenches channel to database."""
+        if not self._signal_db:
+            await self._send_to_admin("❌ Database not configured")
+            return
+        
+        if not self._bot or not self._bot._client:
+            await self._send_to_admin("❌ Trading bot not connected")
+            return
+        
+        await self._send_to_admin("🔄 *Syncing signals from channel...*\n\nThis may take a moment...")
+        
+        try:
+            # Use the trading bot's Telegram client to fetch messages
+            client = self._bot._client
+            
+            # Get the channel entity
+            from src.constants import TRENCHES_CHANNEL_NAME
+            channel = None
+            async for dialog in client.iter_dialogs():
+                if dialog.name == TRENCHES_CHANNEL_NAME:
+                    channel = dialog.entity
+                    break
+            
+            if not channel:
+                await self._send_to_admin(f"❌ Channel not found: {TRENCHES_CHANNEL_NAME}")
+                return
+            
+            # Get the latest message ID from database to know where to start
+            latest_in_db = await self._signal_db.get_latest_message_id()
+            
+            # Fetch messages from the channel
+            new_signals = 0
+            new_alerts = 0
+            total_fetched = 0
+            
+            # Signal detection patterns (from parsers)
+            import re
+            SIGNAL_PATTERN = re.compile(r'VOLUME \+ SM APE SIGNAL DETECTED|APE SIGNAL DETECTED', re.IGNORECASE)
+            TOKEN_PATTERN = re.compile(r'\$([A-Z0-9]{2,10})')
+            ADDRESS_PATTERN = re.compile(r'[1-9A-HJ-NP-Za-km-z]{32,44}')
+            MULTIPLIER_PATTERN = re.compile(r'(\d+(?:\.\d+)?)\s*[xX]', re.IGNORECASE)
+            PROFIT_ALERT_PATTERN = re.compile(r'PROFIT ALERT|X PROFIT|hit \d+\.?\d*x', re.IGNORECASE)
+            
+            # Fetch last 500 messages (or until we hit messages already in DB)
+            messages_to_process = []
+            async for message in client.iter_messages(channel, limit=500):
+                if not message.text:
+                    continue
+                
+                total_fetched += 1
+                
+                # Stop if we've reached messages already in DB
+                if latest_in_db and message.id <= latest_in_db:
+                    break
+                
+                messages_to_process.append(message)
+            
+            # Process messages in chronological order (oldest first)
+            messages_to_process.reverse()
+            
+            for message in messages_to_process:
+                text = message.text
+                msg_time = message.date.replace(tzinfo=timezone.utc) if message.date.tzinfo is None else message.date
+                
+                # Check if it's a signal
+                if SIGNAL_PATTERN.search(text):
+                    # Extract token info
+                    symbol_match = TOKEN_PATTERN.search(text)
+                    address_match = ADDRESS_PATTERN.search(text)
+                    
+                    if symbol_match and address_match:
+                        symbol = symbol_match.group(1)
+                        address = address_match.group(0)
+                        
+                        # Insert signal into database
+                        inserted = await self._signal_db.insert_signal(
+                            message_id=message.id,
+                            token_symbol=symbol,
+                            token_address=address,
+                            signal_time=msg_time,
+                            raw_text=text,
+                        )
+                        if inserted:
+                            new_signals += 1
+                
+                # Check if it's a profit alert
+                elif PROFIT_ALERT_PATTERN.search(text) and message.reply_to:
+                    reply_to_id = message.reply_to.reply_to_msg_id
+                    
+                    # Extract multiplier
+                    mult_match = MULTIPLIER_PATTERN.search(text)
+                    if mult_match and reply_to_id:
+                        multiplier = float(mult_match.group(1))
+                        
+                        # Insert profit alert into database
+                        inserted = await self._signal_db.insert_profit_alert(
+                            message_id=message.id,
+                            reply_to_msg_id=reply_to_id,
+                            multiplier=multiplier,
+                            alert_time=msg_time,
+                            raw_text=text,
+                        )
+                        if inserted:
+                            new_alerts += 1
+            
+            # Get updated counts
+            counts = await self._signal_db.get_signal_count()
+            
+            message = (
+                "✅ *Sync Complete!*\n\n"
+                f"• Messages Scanned: `{total_fetched}`\n"
+                f"• New Signals: `{new_signals}`\n"
+                f"• New Profit Alerts: `{new_alerts}`\n\n"
+                f"📊 *Database Totals*\n"
+                f"• Total Signals: `{counts.get('total_signals', 0)}`\n"
+                f"• Total Alerts: `{counts.get('total_profit_alerts', 0)}`"
+            )
+            
+            await self._send_to_admin(message)
+            logger.info(f"Sync complete: {new_signals} signals, {new_alerts} alerts")
+            
+        except Exception as e:
+            logger.error(f"Sync failed: {e}")
+            await self._send_to_admin(f"❌ *Sync failed*\n\n`{str(e)}`")
+    
+    async def record_signal(
+        self,
+        token_address: str,
+        token_symbol: str,
+        message_id: int,
+    ) -> None:
+        """
+        Record a signal for PnL tracking.
+        
+        Called by the trading bot when a new signal is detected.
+        """
+        await self._signal_history.add_signal(
+            token_address=token_address,
+            token_symbol=token_symbol,
+            message_id=message_id,
+        )

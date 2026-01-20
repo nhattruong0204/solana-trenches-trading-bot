@@ -402,12 +402,18 @@ class TradingBot:
             f"({signal.token_address[:12]}...)"
         )
         
-        # Notify about the signal
+        # Notify about the signal and record for PnL tracking
         if self._notification_bot:
             await self._notification_bot.notify_signal(
                 token_symbol=signal.token_symbol,
                 token_address=signal.token_address,
                 signal_type="BUY",
+            )
+            # Record signal for PnL tracking
+            await self._notification_bot.record_signal(
+                token_address=signal.token_address,
+                token_symbol=signal.token_symbol,
+                message_id=signal.message_id,
             )
         
         # Check if wallet is configured
