@@ -1161,9 +1161,6 @@ class NotificationBot:
                 await self._send_to_admin(f"❌ Channel not found: {TRENCHES_CHANNEL_NAME}")
                 return
             
-            # Get the latest message ID from database to know where to start
-            latest_in_db = await self._signal_db.get_latest_message_id()
-            
             # Fetch messages from the channel
             new_signals = 0
             new_alerts = 0
@@ -1177,19 +1174,22 @@ class NotificationBot:
             MULTIPLIER_PATTERN = re.compile(r'(\d+(?:\.\d+)?)\s*[xX]', re.IGNORECASE)
             PROFIT_ALERT_PATTERN = re.compile(r'PROFIT ALERT|X PROFIT|hit \d+\.?\d*x', re.IGNORECASE)
             
-            # Fetch last 500 messages (or until we hit messages already in DB)
+            # Fetch ALL messages from channel history (no limit, no early stop)
+            # Duplicates are handled by ON CONFLICT in database
             messages_to_process = []
-            async for message in client.iter_messages(channel, limit=500):
+            await self._send_to_admin("⏳ Fetching all channel history... This may take a while.")
+            
+            async for message in client.iter_messages(channel, limit=None):
                 if not message.text:
                     continue
                 
                 total_fetched += 1
-                
-                # Stop if we've reached messages already in DB
-                if latest_in_db and message.id <= latest_in_db:
-                    break
-                
                 messages_to_process.append(message)
+                
+                # Progress update every 1000 messages
+                if total_fetched % 1000 == 0:
+                    logger.info(f"Fetched {total_fetched} messages so far...")
+                    await self._send_to_admin(f"📊 Progress: {total_fetched} messages fetched...")
             
             # Process messages in chronological order (oldest first)
             messages_to_process.reverse()

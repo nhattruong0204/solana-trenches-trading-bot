@@ -3,6 +3,36 @@
 # ==============================================================================
 
 services:
+  # PostgreSQL Database for Signal PnL History
+  postgres:
+    image: postgres:16-alpine
+    container_name: solana-trading-postgres
+    restart: unless-stopped
+    
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+      POSTGRES_DB: wallet_tracker
+    
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./init-db.sql:/docker-entrypoint-initdb.d/init-db.sql:ro
+    
+    networks:
+      - trading-network
+    
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 256M
+
   trading-bot:
     build:
       context: .
@@ -12,12 +42,15 @@ services:
     container_name: solana-trading-bot
     restart: unless-stopped
     
+    # Wait for postgres to be ready
+    depends_on:
+      postgres:
+        condition: service_healthy
+    
     # Mount volumes for persistence
     volumes:
-      # Data directory for state and logs
+      # Data directory for state, logs, and session file
       - ./data:/app/data
-      # Session file (read-only, must exist before starting)
-      - ./wallet_tracker_session.session:/app/wallet_tracker_session.session:ro
     
     # Environment file
     env_file:
@@ -28,19 +61,24 @@ services:
       - TELEGRAM_SESSION_NAME=wallet_tracker_session
       - STATE_FILE=/app/data/trading_state.json
       - LOG_FILE=/app/data/trading_bot.log
+      # Database connection - use 'postgres' service name
+      - POSTGRES_HOST=postgres
+      - POSTGRES_PORT=5432
+      - POSTGRES_USER=postgres
+      - POSTGRES_DATABASE=wallet_tracker
     
     # Command line arguments (optional)
     # command: ["--verbose"]
     
-    # Resource limits
+    # Resource limits (adjust based on your VPS specs)
     deploy:
       resources:
         limits:
-          cpus: '0.50'
-          memory: 256M
+          cpus: '1.0'      # Increase if you have more CPU
+          memory: 512M     # Increase for better performance
         reservations:
-          cpus: '0.10'
-          memory: 64M
+          cpus: '0.25'
+          memory: 128M
     
     # Logging configuration
     logging:
@@ -69,3 +107,6 @@ services:
 networks:
   trading-network:
     driver: bridge
+
+volumes:
+  postgres_data:
