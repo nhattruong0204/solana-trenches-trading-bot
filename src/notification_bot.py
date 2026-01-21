@@ -258,7 +258,9 @@ class NotificationBot:
             BotCommand(command="positions", description="📈 Open positions"),
             BotCommand(command="pnl", description="💰 Current PnL"),
             BotCommand(command="signalpnl", description="📉 Signal PnL (1d/3d/7d/30d/all)"),
-            BotCommand(command="syncsignals", description="🔄 Sync signals from channel"),
+            BotCommand(command="simulate", description="🎯 Simulate trading strategies"),
+            BotCommand(command="syncsignals", description="🔄 Sync NEW signals (incremental)"),
+            BotCommand(command="bootstrap", description="🔧 One-time full history sync"),
             BotCommand(command="settings", description="⚙️ Current settings"),
             BotCommand(command="pause", description="⏸️ Pause trading"),
             BotCommand(command="resume", description="▶️ Resume trading"),
@@ -553,7 +555,11 @@ class NotificationBot:
             "/positions": self._cmd_positions,
             "/pnl": self._cmd_pnl,
             "/signalpnl": self._cmd_signal_pnl,
+            "/realpnl": self._cmd_real_pnl,
+            "/compare": self._cmd_compare,
             "/syncsignals": self._cmd_sync_signals,
+            "/bootstrap": self._cmd_bootstrap_signals,
+            "/simulate": self._cmd_simulate,
             "/settings": self._cmd_settings,
             "/setsize": self._cmd_set_size,
             "/setsell": self._cmd_set_sell,
@@ -606,14 +612,27 @@ class NotificationBot:
                 Button.inline("📉 Signal PnL (Custom)", b"signalpnl_custom"),
             ],
             [
+                Button.inline("📊 Real PnL (All)", b"realpnl_all"),
+                Button.inline("📈 Real PnL (Custom)", b"realpnl_custom"),
+            ],
+            [
+                Button.inline("🆚 Compare PnL (All)", b"compare_all"),
+                Button.inline("🆚 Compare PnL (Custom)", b"compare_custom"),
+            ],
+            [
+                Button.inline("🎯 Simulate (30d)", b"simulate_30d"),
+                Button.inline("🎯 Simulate (7d)", b"simulate_7d"),
+            ],
+            [
                 Button.inline("🔄 Sync Signals", b"cmd_sync_signals"),
-                Button.inline("📊 Stats", b"cmd_stats"),
+                Button.inline("📥 Bootstrap", b"cmd_bootstrap"),
             ],
             [
                 Button.inline("⏸️ Pause", b"cmd_pause"),
                 Button.inline("▶️ Resume", b"cmd_resume"),
             ],
             [
+                Button.inline("📊 Stats", b"cmd_stats"),
                 Button.inline("❓ Help", b"cmd_help"),
             ],
         ]
@@ -675,8 +694,15 @@ class NotificationBot:
             "cmd_pause": lambda: self._cmd_pause(""),
             "cmd_resume": lambda: self._cmd_resume(""),
             "cmd_sync_signals": lambda: self._cmd_sync_signals(""),
+            "cmd_bootstrap": lambda: self._cmd_bootstrap_signals(""),
             "signalpnl_all": lambda: self._cmd_signal_pnl("all"),
             "signalpnl_custom": lambda: self._prompt_custom_days(),
+            "realpnl_all": lambda: self._cmd_real_pnl("all"),
+            "realpnl_custom": lambda: self._prompt_custom_days_realpnl(),
+            "compare_all": lambda: self._cmd_compare("all"),
+            "compare_custom": lambda: self._prompt_custom_days_compare(),
+            "simulate_30d": lambda: self._cmd_simulate("30"),
+            "simulate_7d": lambda: self._cmd_simulate("7"),
             "back_to_menu": lambda: self._cmd_menu(""),
         }
         
@@ -700,7 +726,14 @@ class NotificationBot:
             "• /pnl - Current positions PnL\n"
             "• /signalpnl `<days>` - Signal PnL for N days\n"
             "• /signalpnl `all` - Lifetime signals PnL\n"
-            "• /syncsignals - Sync latest from channel\n\n"
+            "• /realpnl `<days>` - Real-time PnL (live prices)\n"
+            "• /realpnl `all` - All-time real-time PnL\n"
+            "• /compare `<days>` - Compare signal vs real PnL\n"
+            "• /compare `all` - All-time comparison\n\n"
+            "*Signal Sync:*\n"
+            "• /bootstrap - One-time full history sync\n"
+            "• /syncsignals - Sync only NEW signals\n\n"
+            "_Note: Run /bootstrap once first, then /syncsignals only fetches new messages._\n\n"
             "*Control:*\n"
             "• /pause - Pause trading\n"
             "• /resume - Resume trading\n\n"
@@ -1131,10 +1164,663 @@ class NotificationBot:
                 pnl = s.pnl_percent
                 message += f"{i}. `${s.signal.token_symbol}` - `{mult:.2f}X` ({pnl:+.1f}%)\n"
         
+        # Add losers (no profit alerts = -100%)
+        if stats.loser_signals:
+            message += "\n💀 *Losers (No Profit Alert)*\n"
+            for i, s in enumerate(stats.loser_signals, 1):
+                age = s.signal.age_hours
+                if age < 24:
+                    age_str = f"{age:.1f}h ago"
+                else:
+                    age_str = f"{age/24:.1f}d ago"
+                message += f"{i}. `${s.signal.token_symbol}` - ❌ (-100%) - {age_str}\n"
+        
         await self._send_to_admin(message)
     
+    async def _cmd_real_pnl(self, args: str) -> None:
+        """
+        Calculate REAL-TIME PnL by fetching current market cap from DexScreener.
+        
+        Unlike /signalpnl which uses recorded profit alerts,
+        this command fetches live prices to calculate actual current PnL.
+        """
+        from src.signal_database import calculate_real_pnl
+        
+        # Check if database is available
+        if not self._signal_db:
+            await self._send_to_admin(
+                "❌ *Signal database not configured*\n\n"
+                "Set these environment variables:\n"
+                "• `POSTGRES_HOST`\n"
+                "• `POSTGRES_PORT`\n"
+                "• `POSTGRES_USER`\n"
+                "• `POSTGRES_PASSWORD`\n"
+                "• `POSTGRES_DATABASE`"
+            )
+            return
+        
+        # Parse period argument
+        arg = args.strip().lower() if args else "all"
+        
+        # Handle "all" or "lifetime" for all-time stats
+        if arg in ("all", "lifetime"):
+            days = None
+            period_label = "All Time"
+        else:
+            # Try to parse as number of days
+            numeric_arg = arg.replace("d", "").replace("days", "").replace("day", "")
+            try:
+                days = int(numeric_arg)
+                if days <= 0:
+                    await self._send_to_admin(
+                        "❌ *Invalid period*\n\n"
+                        "Please enter a positive number of days.\n\n"
+                        "Examples: `/realpnl 7`, `/realpnl 30`, `/realpnl all`"
+                    )
+                    return
+                period_label = f"Last {days} Days"
+            except ValueError:
+                await self._send_to_admin(
+                    "❌ *Invalid period*\n\n"
+                    "Usage: /realpnl `<days>` or `/realpnl all`\n\n"
+                    "Examples:\n"
+                    "• `/realpnl 7` - Last 7 days\n"
+                    "• `/realpnl 30` - Last 30 days\n"
+                    "• `/realpnl all` - All time"
+                )
+                return
+        
+        # Get signals
+        await self._send_to_admin(f"⏳ Fetching signals from database...")
+        signals = await self._signal_db.get_signals_for_real_pnl(days)
+        
+        if not signals:
+            await self._send_to_admin(
+                f"📭 *No signals found*\n\n"
+                f"Period: {period_label}\n\n"
+                "Make sure the database has signal data."
+            )
+            return
+        
+        # Progress message
+        progress_msg = await self._send_to_admin(
+            f"🔍 Fetching live prices from DexScreener...\n"
+            f"Total signals: {len(signals)}\n"
+            f"Progress: 0/{len(signals)}"
+        )
+        
+        # Progress callback
+        async def update_progress(current: int, total: int):
+            try:
+                await self._bot_client.edit_message(
+                    self._admin_chat_id,
+                    progress_msg.id,
+                    f"🔍 Fetching live prices from DexScreener...\n"
+                    f"Total signals: {total}\n"
+                    f"Progress: {current}/{total}"
+                )
+            except Exception:
+                pass  # Ignore edit errors
+        
+        # Calculate real PnL
+        stats = await calculate_real_pnl(signals, update_progress)
+        stats.period_label = period_label
+        
+        # Build results message
+        win_rate = (stats.winners / stats.successful_fetches * 100) if stats.successful_fetches else 0
+        win_emoji = "🟢" if win_rate >= 50 else "🔴"
+        pnl_emoji = "🟢" if stats.avg_pnl_percent >= 0 else "🔴"
+        
+        # Date range
+        date_range = ""
+        if stats.start_date and stats.end_date:
+            date_range = f"📅 `{stats.start_date.strftime('%Y-%m-%d')}` to `{stats.end_date.strftime('%Y-%m-%d')}`\n\n"
+        
+        message = (
+            f"📊 *Real-Time PnL* - {period_label}\n\n"
+            f"{date_range}"
+            f"📈 *Overview*\n"
+            f"• Total Signals: `{stats.total_signals}`\n"
+            f"• Priced OK: `{stats.successful_fetches}`\n"
+            f"• Rugged: `{stats.rugged_count}` 💀\n\n"
+            f"📊 *Win/Loss*\n"
+            f"• {win_emoji} Win Rate: `{win_rate:.1f}%`\n"
+            f"• Winners (≥1X): `{stats.winners}`\n"
+            f"• Losers (<1X): `{stats.losers}`\n\n"
+            f"💰 *Performance*\n"
+            f"• {pnl_emoji} Avg PnL: `{stats.avg_pnl_percent:+.1f}%`\n"
+            f"• Avg Mult: `{stats.avg_multiplier:.2f}X`\n"
+            f"• Best: `{stats.best_multiplier:.2f}X`\n"
+            f"• Worst: `{stats.worst_multiplier:.2f}X`\n"
+        )
+        
+        # Add top performers
+        if stats.top_performers:
+            message += "\n🏆 *Top Performers (Current)*\n"
+            for i, r in enumerate(stats.top_performers[:15], 1):
+                mult = r.multiplier or 0
+                pnl = r.pnl_percent or 0
+                emoji = r.status_emoji
+                message += f"{i}. `${r.signal.token_symbol}` {emoji} `{mult:.2f}X` ({pnl:+.1f}%)\n"
+        
+        # Add worst performers
+        if stats.worst_performers:
+            message += "\n📉 *Worst Performers (Current)*\n"
+            for i, r in enumerate(stats.worst_performers[:15], 1):
+                mult = r.multiplier or 0
+                pnl = r.pnl_percent or 0
+                emoji = r.status_emoji
+                message += f"{i}. `${r.signal.token_symbol}` {emoji} `{mult:.2f}X` ({pnl:+.1f}%)\n"
+        
+        # Add rugged tokens
+        if stats.rugged_tokens:
+            message += "\n💀 *Rugged Tokens*\n"
+            for i, r in enumerate(stats.rugged_tokens[:10], 1):
+                age = r.signal.age_hours
+                if age < 24:
+                    age_str = f"{age:.1f}h ago"
+                else:
+                    age_str = f"{age/24:.1f}d ago"
+                message += f"{i}. `${r.signal.token_symbol}` - {age_str}\n"
+        
+        await self._send_to_admin(message)
+    
+    async def _prompt_custom_days_realpnl(self) -> None:
+        """Prompt user to enter custom days for real PnL calculation."""
+        await self._send_to_admin(
+            "📊 *Real-Time PnL - Custom Period*\n\n"
+            "Enter the number of days to analyze:\n\n"
+            "Examples:\n"
+            "• `/realpnl 7` - Last 7 days\n"
+            "• `/realpnl 14` - Last 14 days\n"
+            "• `/realpnl 30` - Last 30 days\n\n"
+            "⚠️ Note: This fetches live prices from DexScreener\n"
+            "and may take a while for many signals."
+        )
+    
+    async def _cmd_compare(self, args: str) -> None:
+        """
+        Compare signal PnL (from profit alerts) vs real PnL (live prices).
+        Shows side-by-side table sorted from best to worst.
+        """
+        from src.signal_database import calculate_comparison
+        
+        # Check if database is available
+        if not self._signal_db:
+            await self._send_to_admin(
+                "❌ *Signal database not configured*\n\n"
+                "Set these environment variables:\n"
+                "• `POSTGRES_HOST`\n"
+                "• `POSTGRES_PORT`\n"
+                "• `POSTGRES_USER`\n"
+                "• `POSTGRES_PASSWORD`\n"
+                "• `POSTGRES_DATABASE`"
+            )
+            return
+        
+        # Parse period argument
+        arg = args.strip().lower() if args else "all"
+        
+        # Handle "all" or "lifetime" for all-time stats
+        if arg in ("all", "lifetime"):
+            days = None
+            period_label = "All Time"
+        else:
+            # Try to parse as number of days
+            numeric_arg = arg.replace("d", "").replace("days", "").replace("day", "")
+            try:
+                days = int(numeric_arg)
+                if days <= 0:
+                    await self._send_to_admin(
+                        "❌ *Invalid period*\n\n"
+                        "Please enter a positive number of days.\n\n"
+                        "Examples: `/compare 7`, `/compare 30`, `/compare all`"
+                    )
+                    return
+                period_label = f"Last {days} Days"
+            except ValueError:
+                await self._send_to_admin(
+                    "❌ *Invalid period*\n\n"
+                    "Usage: /compare `<days>` or `/compare all`\n\n"
+                    "Examples:\n"
+                    "• `/compare 7` - Last 7 days\n"
+                    "• `/compare 30` - Last 30 days\n"
+                    "• `/compare all` - All time"
+                )
+                return
+        
+        # Get signals with profit alerts
+        await self._send_to_admin(f"⏳ Fetching signals from database...")
+        signals = await self._signal_db.get_signals_with_pnl_for_compare(days)
+        
+        if not signals:
+            await self._send_to_admin(
+                f"📭 *No signals found*\n\n"
+                f"Period: {period_label}\n\n"
+                "Make sure the database has signal data."
+            )
+            return
+        
+        # Progress message
+        progress_msg = await self._send_to_admin(
+            f"🔍 Fetching live prices from DexScreener...\n"
+            f"Total signals: {len(signals)}\n"
+            f"Progress: 0/{len(signals)}"
+        )
+        
+        # Progress callback
+        async def update_progress(current: int, total: int):
+            try:
+                await self._bot_client.edit_message(
+                    self._admin_chat_id,
+                    progress_msg.id,
+                    f"🔍 Fetching live prices from DexScreener...\n"
+                    f"Total signals: {total}\n"
+                    f"Progress: {current}/{total}"
+                )
+            except Exception:
+                pass  # Ignore edit errors
+        
+        # Calculate comparison
+        stats = await calculate_comparison(signals, update_progress)
+        stats.period_label = period_label
+        
+        # Build header message
+        date_range = ""
+        if stats.start_date and stats.end_date:
+            date_range = f"📅 `{stats.start_date.strftime('%Y-%m-%d')}` to `{stats.end_date.strftime('%Y-%m-%d')}`\n\n"
+        
+        header = (
+            f"🆚 *PnL Comparison* - {period_label}\n\n"
+            f"{date_range}"
+            f"📊 *Summary*\n"
+            f"• Total: `{stats.total_signals}` signals\n"
+            f"• Rugged: `{stats.rugged_count}` 💀\n\n"
+            f"📈 *Signal PnL* (Profit Alerts)\n"
+            f"• Winners: `{stats.signal_winners}`\n"
+            f"• Avg Mult: `{stats.signal_avg_mult:.2f}X`\n\n"
+            f"📊 *Real PnL* (Live Prices)\n"
+            f"• Winners: `{stats.real_winners}`\n"
+            f"• Avg Mult: `{stats.real_avg_mult:.2f}X`\n"
+        )
+        
+        await self._send_to_admin(header)
+        
+        # Build comparison table - sorted from best to worst
+        # Split into chunks to avoid message length limits
+        table_header = (
+            "```\n"
+            "# | Ticker    | Signal | Real\n"
+            "--|-----------|--------|------\n"
+        )
+        
+        results = stats.results
+        chunk_size = 25
+        
+        for chunk_idx in range(0, len(results), chunk_size):
+            chunk = results[chunk_idx:chunk_idx + chunk_size]
+            
+            table = table_header
+            for i, r in enumerate(chunk, chunk_idx + 1):
+                ticker = r.signal.token_symbol[:8]
+                
+                # Signal multiplier
+                if r.has_profit_alert and r.signal_multiplier:
+                    sig_str = f"{r.signal_emoji}{r.signal_multiplier:.1f}X"
+                else:
+                    sig_str = f"{r.signal_emoji} ---"
+                
+                # Real multiplier
+                if r.real_multiplier is not None:
+                    real_str = f"{r.real_emoji}{r.real_multiplier:.1f}X"
+                elif r.is_rugged:
+                    real_str = "💀 RUG"
+                else:
+                    real_str = "❓ ---"
+                
+                table += f"{i:2} | ${ticker:<8} | {sig_str:<6} | {real_str}\n"
+            
+            table += "```"
+            
+            # Add page indicator if multiple chunks
+            if len(results) > chunk_size:
+                page_num = chunk_idx // chunk_size + 1
+                total_pages = (len(results) + chunk_size - 1) // chunk_size
+                table += f"\n_Page {page_num}/{total_pages}_"
+            
+            await self._send_to_admin(table)
+        
+        # Save results to JSON file for AI analysis
+        await self._save_compare_results_json(stats, days)
+    
+    async def _save_compare_results_json(self, stats, days: Optional[int]) -> None:
+        """Save comparison results to JSON and send directly to Telegram channel."""
+        import json
+        import io
+        from datetime import datetime
+        
+        # Generate filename with timestamp
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        period_str = f"{days}d" if days else "all"
+        filename = f"compare_{period_str}_{timestamp}.json"
+        
+        # Build JSON structure optimized for AI analysis
+        json_data = {
+            "metadata": {
+                "generated_at": datetime.now().isoformat(),
+                "period": stats.period_label,
+                "days": days,
+                "start_date": stats.start_date.isoformat() if stats.start_date else None,
+                "end_date": stats.end_date.isoformat() if stats.end_date else None,
+            },
+            "summary": {
+                "total_signals": stats.total_signals,
+                "rugged_count": stats.rugged_count,
+                "signal_pnl": {
+                    "winners": stats.signal_winners,
+                    "win_rate": round(stats.signal_winners / stats.total_signals * 100, 1) if stats.total_signals else 0,
+                    "avg_multiplier": round(stats.signal_avg_mult, 2),
+                },
+                "real_pnl": {
+                    "winners": stats.real_winners,
+                    "win_rate": round(stats.real_winners / stats.total_signals * 100, 1) if stats.total_signals else 0,
+                    "avg_multiplier": round(stats.real_avg_mult, 2),
+                },
+                "insight": self._generate_pnl_insight(stats),
+            },
+            "tokens": [
+                {
+                    "rank": i + 1,
+                    "symbol": r.signal.token_symbol,
+                    "address": r.signal.token_address,
+                    "signal_timestamp": r.signal.timestamp.isoformat(),
+                    "age_hours": round(r.signal.age_hours, 1),
+                    "initial_fdv": r.signal.initial_fdv,
+                    "signal": {
+                        "has_profit_alert": r.has_profit_alert,
+                        "multiplier": round(r.signal_multiplier, 2) if r.signal_multiplier else None,
+                        "pnl_percent": round(r.signal_pnl_percent, 1) if r.signal_pnl_percent else None,
+                        "status": "winner" if r.signal_multiplier and r.signal_multiplier >= 1 else "loser" if r.has_profit_alert else "no_alert",
+                    },
+                    "real": {
+                        "multiplier": round(r.real_multiplier, 2) if r.real_multiplier else None,
+                        "pnl_percent": round(r.real_pnl_percent, 1) if r.real_pnl_percent else None,
+                        "is_rugged": r.is_rugged,
+                        "status": "rugged" if r.is_rugged else "winner" if r.real_multiplier and r.real_multiplier >= 1 else "loser" if r.real_multiplier else "unknown",
+                    },
+                    "decay": {
+                        "signal_to_real_ratio": round(r.real_multiplier / r.signal_multiplier, 2) if r.signal_multiplier and r.real_multiplier else None,
+                        "lost_percentage": round((1 - r.real_multiplier / r.signal_multiplier) * 100, 1) if r.signal_multiplier and r.real_multiplier else None,
+                    },
+                }
+                for i, r in enumerate(stats.results)
+            ],
+        }
+        
+        # Create in-memory file
+        json_bytes = json.dumps(json_data, indent=2).encode('utf-8')
+        file_buffer = io.BytesIO(json_bytes)
+        file_buffer.name = filename
+        
+        # Send file to notification channel (use resolved entity, fallback to admin)
+        caption = (
+            f"📊 *Compare Results - {stats.period_label}*\n\n"
+            f"• Signals: {stats.total_signals}\n"
+            f"• Signal Win Rate: {round(stats.signal_winners / stats.total_signals * 100, 1) if stats.total_signals else 0}%\n"
+            f"• Real Win Rate: {round(stats.real_winners / stats.total_signals * 100, 1) if stats.total_signals else 0}%\n"
+            f"• Rugged: {stats.rugged_count}\n\n"
+            f"_Download and analyze with AI_"
+        )
+        
+        target = self._channel_entity if self._channel_entity else self._admin_user_id
+        await self._client.send_file(
+            target,
+            file_buffer,
+            caption=caption,
+            parse_mode='markdown'
+        )
+    
+    def _generate_pnl_insight(self, stats) -> str:
+        """Generate AI-friendly insight from stats."""
+        insights = []
+        
+        if stats.total_signals == 0:
+            return "No data available"
+        
+        # Win rate comparison
+        signal_wr = stats.signal_winners / stats.total_signals * 100 if stats.total_signals else 0
+        real_wr = stats.real_winners / stats.total_signals * 100 if stats.total_signals else 0
+        
+        if signal_wr > 50:
+            insights.append(f"Signal strategy has {signal_wr:.0f}% win rate (profit alerts)")
+        
+        if real_wr < signal_wr:
+            decay = signal_wr - real_wr
+            insights.append(f"Real PnL shows {decay:.0f}% decay from peak - suggests need for faster exits")
+        
+        # Multiplier analysis
+        if stats.signal_avg_mult > 2:
+            insights.append(f"Avg signal peak of {stats.signal_avg_mult:.1f}X indicates strong pumps")
+        
+        if stats.real_avg_mult < 1:
+            insights.append(f"Current avg of {stats.real_avg_mult:.1f}X shows most gains lost - exit strategy critical")
+        
+        # Rug analysis
+        rug_rate = stats.rugged_count / stats.total_signals * 100 if stats.total_signals else 0
+        if rug_rate > 10:
+            insights.append(f"{rug_rate:.0f}% rug rate - consider stop losses")
+        
+        return "; ".join(insights) if insights else "Data insufficient for insights"
+    
+    async def _cmd_simulate(self, args: str) -> None:
+        """
+        Simulate trading strategies on historical signal data.
+        
+        Usage: /simulate [days] [position_size]
+        Examples:
+            /simulate 30       - Simulate last 30 days with 0.1 SOL per trade
+            /simulate 30 0.2   - Simulate with 0.2 SOL per trade
+        """
+        from src.accurate_backtester import run_accurate_backtest, BacktestConfig
+        import io
+        import json
+        
+        if not self._signal_db:
+            await self._send_to_admin(
+                "❌ *Signal database not configured*\n\n"
+                "Configure database to use strategy simulation."
+            )
+            return
+        
+        # Parse arguments
+        parts = args.strip().split() if args else []
+        days = 30  # Default 30 days
+        position_size = 0.1  # Default position size
+        
+        if len(parts) >= 1:
+            try:
+                days = int(parts[0].replace("d", "").replace("days", ""))
+            except ValueError:
+                pass
+        
+        if len(parts) >= 2:
+            try:
+                position_size = float(parts[1])
+            except ValueError:
+                pass
+        
+        period_label = f"Last {days} Days"
+        
+        progress_msg = await self._send_to_admin(
+            f"🎯 *Running Accurate Backtest*\n\n"
+            f"• Period: {period_label}\n"
+            f"• Position Size: {position_size} SOL\n"
+            f"• Capital: 10 SOL\n\n"
+            f"⏳ Step 1/3: Fetching signals from database..."
+        )
+        
+        try:
+            # Get signals with profit alerts
+            signals = await self._signal_db.get_signals_with_pnl_for_compare(days)
+            
+            if not signals:
+                await self._send_to_admin(
+                    "❌ *No signal data found*\n\n"
+                    "Try syncing signals first with `/syncsignals` or `/bootstrap`"
+                )
+                return
+            
+            # Update progress
+            await self._bot_client.edit_message(
+                self._admin_chat_id,
+                progress_msg.id,
+                f"🎯 *Running Accurate Backtest*\n\n"
+                f"• Period: {period_label}\n"
+                f"• Signals: {len(signals)}\n\n"
+                f"⏳ Step 2/3: Fetching OHLCV candles from GeckoTerminal...\n"
+                f"(This may take a few minutes for many tokens)"
+            )
+            
+            # Build signal list for backtester
+            signal_list = [
+                {
+                    "symbol": swp.signal.token_symbol,
+                    "address": swp.signal.token_address,
+                    "signal_timestamp": swp.signal.timestamp.isoformat(),
+                    "initial_fdv": swp.signal.initial_fdv,
+                    "signal": {
+                        "has_profit_alert": swp.has_profit_alert,
+                        "multiplier": swp.highest_multiplier,
+                    },
+                    "real": {
+                        "multiplier": None,  # Will be fetched
+                        "is_rugged": False,
+                    },
+                }
+                for swp in signals
+            ]
+            
+            # Progress callback
+            fetch_progress = [0]
+            async def update_progress(msg: str):
+                try:
+                    await self._bot_client.edit_message(
+                        self._admin_chat_id,
+                        progress_msg.id,
+                        f"🎯 *Running Accurate Backtest*\n\n"
+                        f"• Period: {period_label}\n"
+                        f"• Signals: {len(signals)}\n\n"
+                        f"⏳ {msg}"
+                    )
+                except:
+                    pass
+            
+            # Run accurate backtest with real price history
+            report, results = await run_accurate_backtest(
+                signal_list,
+                position_size=position_size,
+                capital=10.0,
+                progress_callback=update_progress
+            )
+            
+            if not results:
+                await self._send_to_admin(
+                    "❌ *No valid results*\n\n"
+                    "Could not fetch price data for any tokens."
+                )
+                return
+            
+            # Update to show completion
+            await self._bot_client.edit_message(
+                self._admin_chat_id,
+                progress_msg.id,
+                f"🎯 *Accurate Backtest Complete*\n\n"
+                f"• Period: {period_label}\n"
+                f"• Signals: {len(signals)}\n"
+                f"• Data Coverage: {results[0].data_coverage_pct:.1f}%\n\n"
+                f"✅ Sending report..."
+            )
+            
+            # Send report in chunks
+            max_len = 3800
+            lines = report.split('\n')
+            current_chunk = "```\n"
+            
+            for line in lines:
+                if len(current_chunk) + len(line) + 10 > max_len:
+                    current_chunk += "```"
+                    await self._send_to_admin(current_chunk)
+                    current_chunk = "```\n"
+                current_chunk += line + "\n"
+            
+            if current_chunk.strip() != "```":
+                current_chunk += "```"
+                await self._send_to_admin(current_chunk)
+            
+            # Send best result as JSON
+            if results:
+                best = results[0]
+                best_json = {
+                    "strategy": best.strategy_name,
+                    "roi": round(best.roi, 1),
+                    "win_rate": round(best.win_rate, 1),
+                    "total_pnl_sol": round(best.total_pnl_sol, 4),
+                    "total_fees_sol": round(best.total_fees_sol, 4),
+                    "avg_multiplier": round(best.avg_multiplier, 3),
+                    "avg_hold_hours": round(best.avg_hold_time_hours, 1),
+                    "data_coverage_pct": round(best.data_coverage_pct, 1),
+                }
+                
+                json_bytes = json.dumps(best_json, indent=2).encode('utf-8')
+                file_buffer = io.BytesIO(json_bytes)
+                file_buffer.name = f"backtest_results_{days}d.json"
+                
+                target = self._channel_entity if self._channel_entity else self._admin_user_id
+                await self._client.send_file(
+                    target,
+                    file_buffer,
+                    caption=(
+                        f"🏆 *Best Strategy (Accurate Backtest)*\n\n"
+                        f"• Strategy: `{best.strategy_name}`\n"
+                        f"• ROI: `{best.roi:+.1f}%`\n"
+                        f"• Win Rate: `{best.win_rate:.1f}%`\n"
+                        f"• Fees Paid: `{best.total_fees_sol:.4f} SOL`\n\n"
+                        f"📊 Data Coverage: {best.data_coverage_pct:.1f}%\n"
+                        f"(Real OHLCV candles from GeckoTerminal)"
+                    ),
+                    parse_mode='markdown'
+                )
+            
+        except Exception as e:
+            logger.error(f"Backtest error: {e}", exc_info=True)
+            await self._send_to_admin(f"❌ *Backtest Error*\n\n`{str(e)}`")
+    
+    async def _prompt_custom_days_compare(self) -> None:
+        """Prompt user to enter custom days for comparison."""
+        await self._send_to_admin(
+            "🆚 *Compare PnL - Custom Period*\n\n"
+            "Enter the number of days to compare:\n\n"
+            "Examples:\n"
+            "• `/compare 7` - Last 7 days\n"
+            "• `/compare 14` - Last 14 days\n"
+            "• `/compare 30` - Last 30 days\n\n"
+            "⚠️ Note: This fetches live prices from DexScreener\n"
+            "and may take a while for many signals."
+        )
+    
     async def _cmd_sync_signals(self, args: str) -> None:
-        """Sync latest signals from the Trenches channel to database."""
+        """
+        Sync NEW signals from the Trenches channel to database.
+        
+        This is the INCREMENTAL sync - only fetches messages AFTER the last cursor.
+        For initial full sync, use /bootstrap command.
+        
+        Production-grade pattern:
+        1. Get cursor (last_message_id) from DB
+        2. Fetch only messages with id > cursor
+        3. Process and insert (ON CONFLICT handles duplicates)
+        4. Update cursor AFTER successful commit
+        """
         if not self._signal_db:
             await self._send_to_admin("❌ Database not configured")
             return
@@ -1143,30 +1829,50 @@ class NotificationBot:
             await self._send_to_admin("❌ Trading bot not connected")
             return
         
-        await self._send_to_admin("🔄 *Syncing signals from channel...*\n\nThis may take a moment...")
-        
         try:
+            # Ensure channel state table exists (for upgrades)
+            await self._signal_db.ensure_channel_state_table()
+            
             # Use the trading bot's Telegram client to fetch messages
             client = self._bot._client
             
             # Get the channel entity
             from src.constants import TRENCHES_CHANNEL_NAME
             channel = None
+            channel_id = 0
             async for dialog in client.iter_dialogs():
                 if dialog.name == TRENCHES_CHANNEL_NAME:
                     channel = dialog.entity
+                    channel_id = dialog.entity.id
                     break
             
             if not channel:
                 await self._send_to_admin(f"❌ Channel not found: {TRENCHES_CHANNEL_NAME}")
                 return
             
-            # Fetch messages from the channel
-            new_signals = 0
-            new_alerts = 0
-            total_fetched = 0
+            # Get current cursor state
+            state = await self._signal_db.get_channel_state(channel_id)
+            last_message_id = state.get("last_message_id", 0)
+            bootstrap_completed = state.get("bootstrap_completed", False)
             
-            # Signal detection patterns (from parsers)
+            # If bootstrap not completed, prompt user
+            if not bootstrap_completed:
+                await self._send_to_admin(
+                    "⚠️ *Bootstrap Required*\n\n"
+                    "No previous sync found. You need to run a one-time bootstrap "
+                    "to fetch historical data first.\n\n"
+                    "Use the `/bootstrap` command or 🔧 Bootstrap button to fetch all history.\n\n"
+                    "After bootstrap, sync will only fetch NEW messages."
+                )
+                return
+            
+            await self._send_to_admin(
+                f"🔄 *Syncing NEW signals...*\n\n"
+                f"• Last synced message ID: `{last_message_id}`\n"
+                f"• Fetching messages after this ID..."
+            )
+            
+            # Signal detection patterns
             import re
             SIGNAL_PATTERN = re.compile(r'VOLUME \+ SM APE SIGNAL DETECTED|APE SIGNAL DETECTED', re.IGNORECASE)
             TOKEN_PATTERN = re.compile(r'\$([A-Z0-9]{2,10})')
@@ -1174,25 +1880,35 @@ class NotificationBot:
             MULTIPLIER_PATTERN = re.compile(r'(\d+(?:\.\d+)?)\s*[xX]', re.IGNORECASE)
             PROFIT_ALERT_PATTERN = re.compile(r'PROFIT ALERT|X PROFIT|hit \d+\.?\d*x', re.IGNORECASE)
             
-            # Fetch ALL messages from channel history (no limit, no early stop)
-            # Duplicates are handled by ON CONFLICT in database
+            # Fetch ONLY messages AFTER the cursor (incremental)
             messages_to_process = []
-            await self._send_to_admin("⏳ Fetching all channel history... This may take a while.")
+            total_fetched = 0
+            max_message_id = last_message_id
             
-            async for message in client.iter_messages(channel, limit=None):
+            async for message in client.iter_messages(channel, min_id=last_message_id, limit=None):
                 if not message.text:
+                    continue
+                
+                # Skip if somehow we get old messages
+                if message.id <= last_message_id:
                     continue
                 
                 total_fetched += 1
                 messages_to_process.append(message)
-                
-                # Progress update every 1000 messages
-                if total_fetched % 1000 == 0:
-                    logger.info(f"Fetched {total_fetched} messages so far...")
-                    await self._send_to_admin(f"📊 Progress: {total_fetched} messages fetched...")
+                max_message_id = max(max_message_id, message.id)
+            
+            if total_fetched == 0:
+                await self._send_to_admin(
+                    "✅ *Already up to date!*\n\n"
+                    f"No new messages since last sync (ID: `{last_message_id}`)"
+                )
+                return
             
             # Process messages in chronological order (oldest first)
             messages_to_process.reverse()
+            
+            new_signals = 0
+            new_alerts = 0
             
             for message in messages_to_process:
                 text = message.text
@@ -1200,7 +1916,6 @@ class NotificationBot:
                 
                 # Check if it's a signal
                 if SIGNAL_PATTERN.search(text):
-                    # Extract token info
                     symbol_match = TOKEN_PATTERN.search(text)
                     address_match = ADDRESS_PATTERN.search(text)
                     
@@ -1208,7 +1923,6 @@ class NotificationBot:
                         symbol = symbol_match.group(1)
                         address = address_match.group(0)
                         
-                        # Insert signal into database
                         inserted = await self._signal_db.insert_signal(
                             message_id=message.id,
                             token_symbol=symbol,
@@ -1222,13 +1936,11 @@ class NotificationBot:
                 # Check if it's a profit alert
                 elif PROFIT_ALERT_PATTERN.search(text) and message.reply_to:
                     reply_to_id = message.reply_to.reply_to_msg_id
-                    
-                    # Extract multiplier
                     mult_match = MULTIPLIER_PATTERN.search(text)
+                    
                     if mult_match and reply_to_id:
                         multiplier = float(mult_match.group(1))
                         
-                        # Insert profit alert into database
                         inserted = await self._signal_db.insert_profit_alert(
                             message_id=message.id,
                             reply_to_msg_id=reply_to_id,
@@ -1239,6 +1951,13 @@ class NotificationBot:
                         if inserted:
                             new_alerts += 1
             
+            # Update cursor AFTER successful processing
+            await self._signal_db.update_channel_cursor(
+                channel_id=channel_id,
+                channel_name=TRENCHES_CHANNEL_NAME,
+                last_message_id=max_message_id,
+            )
+            
             # Get updated counts
             counts = await self._signal_db.get_signal_count()
             
@@ -1246,32 +1965,277 @@ class NotificationBot:
                 "✅ *Sync Complete!*\n\n"
                 f"• Messages Scanned: `{total_fetched}`\n"
                 f"• New Signals: `{new_signals}`\n"
-                f"• New Profit Alerts: `{new_alerts}`\n\n"
+                f"• New Profit Alerts: `{new_alerts}`\n"
+                f"• New Cursor: `{max_message_id}`\n\n"
                 f"📊 *Database Totals*\n"
                 f"• Total Signals: `{counts.get('total_signals', 0)}`\n"
                 f"• Total Alerts: `{counts.get('total_profit_alerts', 0)}`"
             )
             
             await self._send_to_admin(message)
-            logger.info(f"Sync complete: {new_signals} signals, {new_alerts} alerts")
+            logger.info(f"Sync complete: {new_signals} signals, {new_alerts} alerts, cursor={max_message_id}")
             
         except Exception as e:
             logger.error(f"Sync failed: {e}")
             await self._send_to_admin(f"❌ *Sync failed*\n\n`{str(e)}`")
+
+    async def _cmd_bootstrap_signals(self, args: str) -> None:
+        """
+        One-time FULL bootstrap of historical signals from the Trenches channel.
+        
+        This should only be run ONCE on first deployment or when adding a new channel.
+        After bootstrap, use the regular sync (which is incremental).
+        
+        ⚠️ This fetches ALL messages - may take several minutes for large channels.
+        """
+        if not self._signal_db:
+            await self._send_to_admin("❌ Database not configured")
+            return
+        
+        if not self._bot or not self._bot._client:
+            await self._send_to_admin("❌ Trading bot not connected")
+            return
+        
+        try:
+            # Ensure channel state table exists
+            await self._signal_db.ensure_channel_state_table()
+            
+            client = self._bot._client
+            
+            # Get the channel entity
+            from src.constants import TRENCHES_CHANNEL_NAME
+            channel = None
+            channel_id = 0
+            async for dialog in client.iter_dialogs():
+                if dialog.name == TRENCHES_CHANNEL_NAME:
+                    channel = dialog.entity
+                    channel_id = dialog.entity.id
+                    break
+            
+            if not channel:
+                await self._send_to_admin(f"❌ Channel not found: {TRENCHES_CHANNEL_NAME}")
+                return
+            
+            # Check if bootstrap already completed
+            state = await self._signal_db.get_channel_state(channel_id)
+            if state.get("bootstrap_completed", False):
+                await self._send_to_admin(
+                    "⚠️ *Bootstrap Already Completed*\n\n"
+                    f"Last message ID: `{state.get('last_message_id', 0)}`\n"
+                    f"Completed at: `{state.get('last_processed_at', 'Unknown')}`\n\n"
+                    "Use the regular **Sync Signals** button to fetch new messages.\n\n"
+                    "_If you really need to re-bootstrap, clear the database first._"
+                )
+                return
+            
+            await self._send_to_admin(
+                "🔧 *Starting Bootstrap...*\n\n"
+                "⏳ Fetching ALL channel history. This may take several minutes...\n"
+                "You'll receive progress updates every 1000 messages."
+            )
+            
+            # Signal detection patterns
+            import re
+            SIGNAL_PATTERN = re.compile(r'VOLUME \+ SM APE SIGNAL DETECTED|APE SIGNAL DETECTED', re.IGNORECASE)
+            TOKEN_PATTERN = re.compile(r'\$([A-Z0-9]{2,10})')
+            ADDRESS_PATTERN = re.compile(r'[1-9A-HJ-NP-Za-km-z]{32,44}')
+            MULTIPLIER_PATTERN = re.compile(r'(\d+(?:\.\d+)?)\s*[xX]', re.IGNORECASE)
+            PROFIT_ALERT_PATTERN = re.compile(r'PROFIT ALERT|X PROFIT|hit \d+\.?\d*x', re.IGNORECASE)
+            
+            # Fetch ALL messages from channel history
+            messages_to_process = []
+            total_fetched = 0
+            max_message_id = 0
+            
+            async for message in client.iter_messages(channel, limit=None):
+                if not message.text:
+                    continue
+                
+                total_fetched += 1
+                messages_to_process.append(message)
+                max_message_id = max(max_message_id, message.id)
+                
+                # Progress update every 1000 messages
+                if total_fetched % 1000 == 0:
+                    logger.info(f"Bootstrap: fetched {total_fetched} messages...")
+                    await self._send_to_admin(f"📊 Progress: `{total_fetched}` messages fetched...")
+            
+            await self._send_to_admin(f"📥 Processing `{total_fetched}` messages...")
+            
+            # Process messages in chronological order (oldest first)
+            messages_to_process.reverse()
+            
+            new_signals = 0
+            new_alerts = 0
+            
+            for message in messages_to_process:
+                text = message.text
+                msg_time = message.date.replace(tzinfo=timezone.utc) if message.date.tzinfo is None else message.date
+                
+                # Check if it's a signal
+                if SIGNAL_PATTERN.search(text):
+                    symbol_match = TOKEN_PATTERN.search(text)
+                    address_match = ADDRESS_PATTERN.search(text)
+                    
+                    if symbol_match and address_match:
+                        symbol = symbol_match.group(1)
+                        address = address_match.group(0)
+                        
+                        inserted = await self._signal_db.insert_signal(
+                            message_id=message.id,
+                            token_symbol=symbol,
+                            token_address=address,
+                            signal_time=msg_time,
+                            raw_text=text,
+                        )
+                        if inserted:
+                            new_signals += 1
+                
+                # Check if it's a profit alert
+                elif PROFIT_ALERT_PATTERN.search(text) and message.reply_to:
+                    reply_to_id = message.reply_to.reply_to_msg_id
+                    mult_match = MULTIPLIER_PATTERN.search(text)
+                    
+                    if mult_match and reply_to_id:
+                        multiplier = float(mult_match.group(1))
+                        
+                        inserted = await self._signal_db.insert_profit_alert(
+                            message_id=message.id,
+                            reply_to_msg_id=reply_to_id,
+                            multiplier=multiplier,
+                            alert_time=msg_time,
+                            raw_text=text,
+                        )
+                        if inserted:
+                            new_alerts += 1
+            
+            # Update cursor and mark bootstrap complete
+            await self._signal_db.update_channel_cursor(
+                channel_id=channel_id,
+                channel_name=TRENCHES_CHANNEL_NAME,
+                last_message_id=max_message_id,
+                mark_bootstrap_complete=True,  # Important!
+            )
+            
+            # Get updated counts
+            counts = await self._signal_db.get_signal_count()
+            
+            message = (
+                "✅ *Bootstrap Complete!*\n\n"
+                f"• Total Messages Scanned: `{total_fetched}`\n"
+                f"• Signals Found: `{new_signals}`\n"
+                f"• Profit Alerts Found: `{new_alerts}`\n"
+                f"• Cursor Set To: `{max_message_id}`\n\n"
+                f"📊 *Database Totals*\n"
+                f"• Total Signals: `{counts.get('total_signals', 0)}`\n"
+                f"• Total Alerts: `{counts.get('total_profit_alerts', 0)}`\n\n"
+                "✨ From now on, use **Sync Signals** to fetch only NEW messages."
+            )
+            
+            await self._send_to_admin(message)
+            logger.info(f"Bootstrap complete: {new_signals} signals, {new_alerts} alerts, cursor={max_message_id}")
+            
+        except Exception as e:
+            logger.error(f"Bootstrap failed: {e}")
+            await self._send_to_admin(f"❌ *Bootstrap failed*\n\n`{str(e)}`")
     
     async def record_signal(
         self,
         token_address: str,
         token_symbol: str,
         message_id: int,
+        signal_time: Optional[datetime] = None,
+        raw_text: Optional[str] = None,
+        channel_id: Optional[int] = None,
     ) -> None:
         """
-        Record a signal for PnL tracking.
+        Record a signal for PnL tracking (LIVE MODE).
         
-        Called by the trading bot when a new signal is detected.
+        Called by the trading bot when a new signal is detected via event handler.
+        This is the production-grade live listener pattern - signals come in real-time.
+        
+        Args:
+            token_address: Token contract address
+            token_symbol: Token symbol
+            message_id: Telegram message ID
+            signal_time: Signal timestamp (defaults to now)
+            raw_text: Raw message text (optional, for DB storage)
+            channel_id: Channel ID (for cursor update)
         """
+        # Record to in-memory history (for quick lookups)
         await self._signal_history.add_signal(
             token_address=token_address,
             token_symbol=token_symbol,
             message_id=message_id,
         )
+        
+        # Also insert into database if available (production persistence)
+        if self._signal_db:
+            if signal_time is None:
+                signal_time = datetime.now(timezone.utc)
+            
+            inserted = await self._signal_db.insert_signal(
+                message_id=message_id,
+                token_symbol=token_symbol,
+                token_address=token_address,
+                signal_time=signal_time,
+                raw_text=raw_text or f"${token_symbol} signal",
+            )
+            
+            if inserted:
+                logger.debug(f"Signal inserted to DB: ${token_symbol} (msg_id={message_id})")
+                
+                # Update cursor if channel_id provided
+                if channel_id:
+                    from src.constants import TRENCHES_CHANNEL_NAME
+                    await self._signal_db.update_channel_cursor(
+                        channel_id=channel_id,
+                        channel_name=TRENCHES_CHANNEL_NAME,
+                        last_message_id=message_id,
+                    )
+    
+    async def record_profit_alert(
+        self,
+        message_id: int,
+        reply_to_msg_id: int,
+        multiplier: float,
+        alert_time: Optional[datetime] = None,
+        raw_text: Optional[str] = None,
+        channel_id: Optional[int] = None,
+    ) -> None:
+        """
+        Record a profit alert (LIVE MODE).
+        
+        Called by the trading bot when a profit alert is detected via event handler.
+        
+        Args:
+            message_id: Telegram message ID
+            reply_to_msg_id: Original signal message ID
+            multiplier: Profit multiplier (e.g., 2.0 for 2X)
+            alert_time: Alert timestamp
+            raw_text: Raw message text
+            channel_id: Channel ID (for cursor update)
+        """
+        if self._signal_db:
+            if alert_time is None:
+                alert_time = datetime.now(timezone.utc)
+            
+            inserted = await self._signal_db.insert_profit_alert(
+                message_id=message_id,
+                reply_to_msg_id=reply_to_msg_id,
+                multiplier=multiplier,
+                alert_time=alert_time,
+                raw_text=raw_text or f"{multiplier}X profit alert",
+            )
+            
+            if inserted:
+                logger.debug(f"Profit alert inserted to DB: {multiplier}X (msg_id={message_id})")
+                
+                # Update cursor if channel_id provided
+                if channel_id:
+                    from src.constants import TRENCHES_CHANNEL_NAME
+                    await self._signal_db.update_channel_cursor(
+                        channel_id=channel_id,
+                        channel_name=TRENCHES_CHANNEL_NAME,
+                        last_message_id=message_id,
+                    )

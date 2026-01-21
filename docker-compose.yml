@@ -15,7 +15,7 @@ services:
       POSTGRES_DB: wallet_tracker
     
     volumes:
-      - postgres_data:/var/lib/postgresql/data
+      - solana-trading-bot_postgres_data:/var/lib/postgresql/data
       - ./init-db.sql:/docker-entrypoint-initdb.d/init-db.sql:ro
     
     networks:
@@ -109,4 +109,5 @@ networks:
     driver: bridge
 
 volumes:
-  postgres_data:
+  solana-trading-bot_postgres_data:
+    external: true

@@ -346,7 +346,10 @@ class TradingBot:
     
     async def _on_new_message(self, event: events.NewMessage.Event) -> None:
         """
-        Handle new messages from the channel.
+        Handle new messages from the channel (LIVE MODE).
+        
+        This is the production-grade event-based listener pattern.
+        Messages are processed as they arrive in real-time.
         
         Args:
             event: Telethon new message event
@@ -357,6 +360,10 @@ class TradingBot:
             return
         
         self._messages_processed += 1
+        
+        # Get message metadata for database storage
+        msg_time = message.date.replace(tzinfo=timezone.utc) if message.date.tzinfo is None else message.date
+        channel_id = self._channel_entity.id if self._channel_entity else None
         
         # Get reply information
         reply_to_msg_id = message.reply_to_msg_id if message.reply_to else None
@@ -402,18 +409,21 @@ class TradingBot:
             f"({signal.token_address[:12]}...)"
         )
         
-        # Notify about the signal and record for PnL tracking
+        # Notify about the signal and record for PnL tracking (LIVE MODE)
         if self._notification_bot:
             await self._notification_bot.notify_signal(
                 token_symbol=signal.token_symbol,
                 token_address=signal.token_address,
                 signal_type="BUY",
             )
-            # Record signal for PnL tracking
+            # Record signal to database (live mode - updates cursor automatically)
             await self._notification_bot.record_signal(
                 token_address=signal.token_address,
                 token_symbol=signal.token_symbol,
                 message_id=signal.message_id,
+                signal_time=signal.timestamp if hasattr(signal, 'timestamp') else None,
+                raw_text=signal.raw_text if hasattr(signal, 'raw_text') else None,
+                channel_id=self._channel_entity.id if self._channel_entity else None,
             )
         
         # Check if wallet is configured
@@ -508,6 +518,17 @@ class TradingBot:
             f"📨 Profit alert: {alert.multiplier}X "
             f"(reply to msg {alert.reply_to_msg_id})"
         )
+        
+        # Record profit alert to database (LIVE MODE)
+        if self._notification_bot:
+            await self._notification_bot.record_profit_alert(
+                message_id=alert.message_id,
+                reply_to_msg_id=alert.reply_to_msg_id,
+                multiplier=alert.multiplier,
+                alert_time=alert.timestamp if hasattr(alert, 'timestamp') else None,
+                raw_text=alert.raw_text if hasattr(alert, 'raw_text') else None,
+                channel_id=self._channel_entity.id if self._channel_entity else None,
+            )
         
         # Find position
         if not self._state:

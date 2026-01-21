@@ -119,6 +119,7 @@ class PnLStats:
     end_date: Optional[datetime] = None
     top_performers: list[SignalWithPnL] = field(default_factory=list)
     worst_performers: list[SignalWithPnL] = field(default_factory=list)
+    loser_signals: list[SignalWithPnL] = field(default_factory=list)  # Signals with no profit alerts
 
 
 def parse_signal_message(raw_text: str) -> tuple[Optional[str], Optional[str], Optional[float]]:
@@ -421,6 +422,9 @@ class SignalDatabase:
         sorted_by_mult_asc = sorted(with_profit, key=lambda s: s.max_multiplier)
         worst_performers = sorted_by_mult_asc[:15]
         
+        # Get loser signals (sorted by timestamp, most recent first)
+        loser_signals = sorted(losers, key=lambda s: s.signal.timestamp, reverse=True)[:15]
+        
         # Date range
         timestamps = [s.signal.timestamp for s in signals]
         start_date = min(timestamps) if timestamps else None
@@ -442,6 +446,7 @@ class SignalDatabase:
             end_date=end_date,
             top_performers=top_performers,
             worst_performers=worst_performers,
+            loser_signals=loser_signals,
         )
     
     async def get_signal_count(self) -> dict[str, int]:
@@ -625,3 +630,531 @@ class SignalDatabase:
         except Exception as e:
             logger.error(f"Failed to insert profit alert: {e}")
             return False
+
+    # =========================================================================
+    # Channel State / Cursor Management (Production-Grade Pattern)
+    # =========================================================================
+    
+    async def get_channel_state(self, channel_id: int) -> dict:
+        """
+        Get the current state/cursor for a channel.
+        
+        Returns:
+            dict with last_message_id, bootstrap_completed, etc.
+        """
+        if not self._pool:
+            return {"last_message_id": 0, "bootstrap_completed": False}
+        
+        try:
+            async with self._pool.acquire() as conn:
+                row = await conn.fetchrow('''
+                    SELECT last_message_id, bootstrap_completed, last_processed_at
+                    FROM telegram_channel_state
+                    WHERE channel_id = $1
+                ''', channel_id)
+                
+                if row:
+                    return {
+                        "last_message_id": row["last_message_id"],
+                        "bootstrap_completed": row["bootstrap_completed"],
+                        "last_processed_at": row["last_processed_at"],
+                    }
+                return {"last_message_id": 0, "bootstrap_completed": False}
+                
+        except Exception as e:
+            logger.error(f"Failed to get channel state: {e}")
+            return {"last_message_id": 0, "bootstrap_completed": False}
+    
+    async def update_channel_cursor(
+        self, 
+        channel_id: int, 
+        channel_name: str,
+        last_message_id: int,
+        mark_bootstrap_complete: bool = False
+    ) -> bool:
+        """
+        Update the cursor (last_message_id) for a channel.
+        
+        This should be called AFTER successfully processing and committing messages.
+        
+        Args:
+            channel_id: Telegram channel ID
+            channel_name: Channel name for reference
+            last_message_id: The latest message ID that was processed
+            mark_bootstrap_complete: Set to True after initial full sync
+            
+        Returns:
+            True if updated successfully
+        """
+        if not self._pool:
+            return False
+        
+        try:
+            async with self._pool.acquire() as conn:
+                if mark_bootstrap_complete:
+                    await conn.execute('''
+                        INSERT INTO telegram_channel_state 
+                            (channel_id, channel_name, last_message_id, last_processed_at, 
+                             bootstrap_completed, bootstrap_completed_at, updated_at)
+                        VALUES ($1, $2, $3, NOW(), TRUE, NOW(), NOW())
+                        ON CONFLICT (channel_id) DO UPDATE SET
+                            last_message_id = GREATEST(telegram_channel_state.last_message_id, $3),
+                            last_processed_at = NOW(),
+                            bootstrap_completed = TRUE,
+                            bootstrap_completed_at = COALESCE(telegram_channel_state.bootstrap_completed_at, NOW()),
+                            updated_at = NOW()
+                    ''', channel_id, channel_name, last_message_id)
+                else:
+                    await conn.execute('''
+                        INSERT INTO telegram_channel_state 
+                            (channel_id, channel_name, last_message_id, last_processed_at, updated_at)
+                        VALUES ($1, $2, $3, NOW(), NOW())
+                        ON CONFLICT (channel_id) DO UPDATE SET
+                            last_message_id = GREATEST(telegram_channel_state.last_message_id, $3),
+                            last_processed_at = NOW(),
+                            updated_at = NOW()
+                    ''', channel_id, channel_name, last_message_id)
+                
+                logger.info(f"Updated cursor for channel {channel_id}: last_message_id={last_message_id}")
+                return True
+                
+        except Exception as e:
+            logger.error(f"Failed to update channel cursor: {e}")
+            return False
+    
+    async def ensure_channel_state_table(self) -> bool:
+        """
+        Ensure the telegram_channel_state table exists.
+        Called on startup to handle upgrades from older versions.
+        """
+        if not self._pool:
+            return False
+        
+        try:
+            async with self._pool.acquire() as conn:
+                await conn.execute('''
+                    CREATE TABLE IF NOT EXISTS telegram_channel_state (
+                        id SERIAL PRIMARY KEY,
+                        channel_id BIGINT NOT NULL UNIQUE,
+                        channel_name TEXT NOT NULL,
+                        last_message_id BIGINT NOT NULL DEFAULT 0,
+                        last_processed_at TIMESTAMP WITH TIME ZONE,
+                        bootstrap_completed BOOLEAN DEFAULT FALSE,
+                        bootstrap_completed_at TIMESTAMP WITH TIME ZONE,
+                        created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+                        updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+                    )
+                ''')
+                return True
+        except Exception as e:
+            logger.error(f"Failed to ensure channel_state table: {e}")
+            return False
+
+    async def get_signals_for_real_pnl(
+        self, 
+        days: Optional[int] = None
+    ) -> list[TokenSignal]:
+        """
+        Get signals for real PnL calculation.
+        
+        Args:
+            days: Number of days to look back (None for all time)
+            
+        Returns:
+            List of TokenSignal objects with token addresses
+        """
+        if not self._pool:
+            return []
+        
+        try:
+            async with self._pool.acquire() as conn:
+                if days:
+                    cutoff = datetime.now(timezone.utc) - timedelta(days=days)
+                    rows = await conn.fetch('''
+                        SELECT id, telegram_message_id, message_timestamp, raw_text
+                        FROM raw_telegram_messages
+                        WHERE chat_title = $1
+                        AND source_bot = 'trenches_sync'
+                        AND raw_json IS NULL
+                        AND message_timestamp >= $2
+                        ORDER BY message_timestamp DESC
+                    ''', self.CHANNEL_NAME, cutoff)
+                else:
+                    rows = await conn.fetch('''
+                        SELECT id, telegram_message_id, message_timestamp, raw_text
+                        FROM raw_telegram_messages
+                        WHERE chat_title = $1
+                        AND source_bot = 'trenches_sync'
+                        AND raw_json IS NULL
+                        ORDER BY message_timestamp DESC
+                    ''', self.CHANNEL_NAME)
+                
+                signals = []
+                for row in rows:
+                    symbol, address, fdv = parse_signal_message(row['raw_text'] or '')
+                    if symbol and address:
+                        signals.append(TokenSignal(
+                            db_id=row['id'],
+                            telegram_msg_id=row['telegram_message_id'],
+                            timestamp=row['message_timestamp'],
+                            token_symbol=symbol,
+                            token_address=address,
+                            initial_fdv=fdv,
+                        ))
+                
+                return signals
+                
+        except Exception as e:
+            logger.error(f"Failed to get signals for real PnL: {e}")
+            return []
+
+    async def get_signals_with_pnl_for_compare(
+        self, 
+        days: Optional[int] = None
+    ) -> list[SignalWithPnL]:
+        """
+        Get signals with their profit alerts for comparison.
+        
+        Uses the same logic as get_signals_in_period for consistency.
+        
+        Args:
+            days: Number of days to look back (None for all time)
+            
+        Returns:
+            List of SignalWithPnL objects
+        """
+        # Reuse the existing get_signals_in_period method
+        return await self.get_signals_in_period(days)
+
+
+@dataclass
+class RealPnLResult:
+    """Result of a real-time PnL calculation for a single token."""
+    
+    signal: TokenSignal
+    current_price: Optional[float] = None
+    current_mcap: Optional[float] = None
+    initial_mcap: Optional[float] = None
+    multiplier: Optional[float] = None
+    pnl_percent: Optional[float] = None
+    is_rugged: bool = False
+    error: Optional[str] = None
+    
+    @property
+    def status_emoji(self) -> str:
+        if self.is_rugged:
+            return "💀"
+        if self.multiplier is None:
+            return "❓"
+        if self.multiplier >= 10:
+            return "🚀"
+        if self.multiplier >= 2:
+            return "🟢"
+        if self.multiplier >= 1:
+            return "🟡"
+        return "🔴"
+
+
+@dataclass
+class RealPnLStats:
+    """Aggregated real-time PnL statistics."""
+    
+    total_signals: int = 0
+    successful_fetches: int = 0
+    rugged_count: int = 0
+    winners: int = 0  # > 1X
+    losers: int = 0   # < 1X
+    avg_multiplier: float = 0.0
+    best_multiplier: float = 0.0
+    worst_multiplier: float = 0.0
+    avg_pnl_percent: float = 0.0
+    period_label: str = ""
+    start_date: Optional[datetime] = None
+    end_date: Optional[datetime] = None
+    results: list[RealPnLResult] = field(default_factory=list)
+    top_performers: list[RealPnLResult] = field(default_factory=list)
+    worst_performers: list[RealPnLResult] = field(default_factory=list)
+    rugged_tokens: list[RealPnLResult] = field(default_factory=list)
+
+
+@dataclass
+class CompareResult:
+    """Comparison result for a single token - signal PnL vs real PnL."""
+    
+    signal: TokenSignal
+    signal_multiplier: Optional[float] = None  # From profit alerts
+    signal_pnl_percent: Optional[float] = None
+    real_multiplier: Optional[float] = None  # From live DexScreener
+    real_pnl_percent: Optional[float] = None
+    is_rugged: bool = False
+    has_profit_alert: bool = False
+    
+    @property
+    def best_multiplier(self) -> float:
+        """Get the best of signal or real multiplier for sorting."""
+        mults = [m for m in [self.signal_multiplier, self.real_multiplier] if m is not None]
+        return max(mults) if mults else 0
+    
+    @property
+    def signal_emoji(self) -> str:
+        """Emoji for signal PnL status."""
+        if not self.has_profit_alert:
+            return "❌"
+        if self.signal_multiplier is None:
+            return "❓"
+        if self.signal_multiplier >= 10:
+            return "🚀"
+        if self.signal_multiplier >= 2:
+            return "🟢"
+        if self.signal_multiplier >= 1:
+            return "🟡"
+        return "🔴"
+    
+    @property
+    def real_emoji(self) -> str:
+        """Emoji for real PnL status."""
+        if self.is_rugged:
+            return "💀"
+        if self.real_multiplier is None:
+            return "❓"
+        if self.real_multiplier >= 10:
+            return "🚀"
+        if self.real_multiplier >= 2:
+            return "🟢"
+        if self.real_multiplier >= 1:
+            return "🟡"
+        return "🔴"
+
+
+@dataclass
+class CompareStats:
+    """Aggregated comparison statistics."""
+    
+    total_signals: int = 0
+    period_label: str = ""
+    start_date: Optional[datetime] = None
+    end_date: Optional[datetime] = None
+    results: list[CompareResult] = field(default_factory=list)
+    
+    # Signal PnL stats
+    signal_winners: int = 0
+    signal_avg_mult: float = 0.0
+    
+    # Real PnL stats  
+    real_winners: int = 0
+    real_avg_mult: float = 0.0
+    rugged_count: int = 0
+
+
+async def fetch_token_price_dexscreener(token_address: str) -> dict:
+    """
+    Fetch current token price and market cap from DexScreener.
+    
+    Args:
+        token_address: Solana token address
+        
+    Returns:
+        Dict with price, mcap, liquidity info
+    """
+    import httpx
+    
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            url = f"https://api.dexscreener.com/latest/dex/tokens/{token_address}"
+            response = await client.get(url)
+            
+            if response.status_code != 200:
+                return {"error": f"API error: {response.status_code}"}
+            
+            data = response.json()
+            pairs = data.get("pairs", [])
+            
+            if not pairs:
+                return {"error": "No trading pairs found", "is_rugged": True}
+            
+            # Get the pair with highest liquidity
+            best_pair = max(pairs, key=lambda p: float(p.get("liquidity", {}).get("usd", 0) or 0))
+            
+            price_usd = float(best_pair.get("priceUsd", 0) or 0)
+            mcap = float(best_pair.get("marketCap", 0) or best_pair.get("fdv", 0) or 0)
+            liquidity = float(best_pair.get("liquidity", {}).get("usd", 0) or 0)
+            
+            # Check if rugged (very low liquidity or price)
+            is_rugged = liquidity < 100 or mcap < 1000
+            
+            return {
+                "price_usd": price_usd,
+                "mcap": mcap,
+                "liquidity": liquidity,
+                "is_rugged": is_rugged,
+                "pair_address": best_pair.get("pairAddress"),
+                "dex": best_pair.get("dexId"),
+            }
+            
+    except httpx.TimeoutException:
+        return {"error": "Timeout fetching price"}
+    except Exception as e:
+        return {"error": str(e)}
+
+
+async def calculate_real_pnl(
+    signals: list[TokenSignal],
+    progress_callback=None,
+) -> RealPnLStats:
+    """
+    Calculate real-time PnL by fetching current prices from DexScreener.
+    
+    Args:
+        signals: List of signals to calculate PnL for
+        progress_callback: Optional async callback for progress updates
+        
+    Returns:
+        RealPnLStats with all results
+    """
+    results = []
+    total = len(signals)
+    
+    for i, signal in enumerate(signals):
+        # Progress update
+        if progress_callback and (i + 1) % 10 == 0:
+            await progress_callback(i + 1, total)
+        
+        # Fetch current price
+        price_data = await fetch_token_price_dexscreener(signal.token_address)
+        
+        result = RealPnLResult(signal=signal)
+        
+        if "error" in price_data:
+            result.error = price_data["error"]
+            result.is_rugged = price_data.get("is_rugged", False)
+        else:
+            result.current_price = price_data.get("price_usd")
+            result.current_mcap = price_data.get("mcap")
+            result.is_rugged = price_data.get("is_rugged", False)
+            
+            # Calculate multiplier if we have initial FDV
+            if signal.initial_fdv and result.current_mcap:
+                result.initial_mcap = signal.initial_fdv
+                result.multiplier = result.current_mcap / signal.initial_fdv
+                result.pnl_percent = (result.multiplier - 1) * 100
+        
+        results.append(result)
+        
+        # Small delay to avoid rate limiting
+        await asyncio.sleep(0.1)
+    
+    # Calculate aggregated stats
+    successful = [r for r in results if r.multiplier is not None]
+    rugged = [r for r in results if r.is_rugged]
+    
+    multipliers = [r.multiplier for r in successful if r.multiplier]
+    winners = [r for r in successful if r.multiplier and r.multiplier >= 1]
+    losers = [r for r in successful if r.multiplier and r.multiplier < 1]
+    
+    # Sort for top/worst performers
+    sorted_by_mult = sorted(successful, key=lambda r: r.multiplier or 0, reverse=True)
+    top_performers = sorted_by_mult[:15]
+    worst_performers = sorted_by_mult[-15:][::-1] if len(sorted_by_mult) > 15 else sorted_by_mult[::-1]
+    
+    # Date range
+    timestamps = [s.signal.timestamp for s in results]
+    start_date = min(timestamps) if timestamps else None
+    end_date = max(timestamps) if timestamps else None
+    
+    return RealPnLStats(
+        total_signals=total,
+        successful_fetches=len(successful),
+        rugged_count=len(rugged),
+        winners=len(winners),
+        losers=len(losers),
+        avg_multiplier=sum(multipliers) / len(multipliers) if multipliers else 0,
+        best_multiplier=max(multipliers) if multipliers else 0,
+        worst_multiplier=min(multipliers) if multipliers else 0,
+        avg_pnl_percent=sum(r.pnl_percent for r in successful if r.pnl_percent) / len(successful) if successful else 0,
+        start_date=start_date,
+        end_date=end_date,
+        results=results,
+        top_performers=top_performers,
+        worst_performers=worst_performers,
+        rugged_tokens=rugged[:15],
+    )
+
+
+async def calculate_comparison(
+    signals_with_pnl: list[SignalWithPnL],
+    progress_callback=None,
+) -> CompareStats:
+    """
+    Calculate comparison between signal PnL (profit alerts) and real PnL (live prices).
+    
+    Args:
+        signals_with_pnl: List of signals with their profit alerts
+        progress_callback: Optional async callback for progress updates
+        
+    Returns:
+        CompareStats with all comparison results sorted by best multiplier
+    """
+    results = []
+    total = len(signals_with_pnl)
+    
+    for i, swp in enumerate(signals_with_pnl):
+        # Progress update
+        if progress_callback and (i + 1) % 10 == 0:
+            await progress_callback(i + 1, total)
+        
+        signal = swp.signal
+        
+        # Create comparison result
+        result = CompareResult(signal=signal)
+        
+        # Signal PnL from profit alerts
+        if swp.max_multiplier:
+            result.has_profit_alert = True
+            result.signal_multiplier = swp.max_multiplier
+            result.signal_pnl_percent = swp.pnl_percent
+        
+        # Real PnL from DexScreener
+        price_data = await fetch_token_price_dexscreener(signal.token_address)
+        
+        if "error" not in price_data:
+            current_mcap = price_data.get("mcap")
+            result.is_rugged = price_data.get("is_rugged", False)
+            
+            if signal.initial_fdv and current_mcap:
+                result.real_multiplier = current_mcap / signal.initial_fdv
+                result.real_pnl_percent = (result.real_multiplier - 1) * 100
+        else:
+            result.is_rugged = price_data.get("is_rugged", False)
+        
+        results.append(result)
+        
+        # Small delay to avoid rate limiting
+        await asyncio.sleep(0.1)
+    
+    # Sort by best multiplier (highest first)
+    sorted_results = sorted(results, key=lambda r: r.best_multiplier, reverse=True)
+    
+    # Calculate stats
+    signal_mults = [r.signal_multiplier for r in results if r.signal_multiplier]
+    real_mults = [r.real_multiplier for r in results if r.real_multiplier]
+    signal_winners = len([m for m in signal_mults if m >= 1])
+    real_winners = len([m for m in real_mults if m >= 1])
+    rugged = len([r for r in results if r.is_rugged])
+    
+    # Date range
+    timestamps = [r.signal.timestamp for r in results]
+    start_date = min(timestamps) if timestamps else None
+    end_date = max(timestamps) if timestamps else None
+    
+    return CompareStats(
+        total_signals=total,
+        period_label="",
+        start_date=start_date,
+        end_date=end_date,
+        results=sorted_results,
+        signal_winners=signal_winners,
+        signal_avg_mult=sum(signal_mults) / len(signal_mults) if signal_mults else 0,
+        real_winners=real_winners,
+        real_avg_mult=sum(real_mults) / len(real_mults) if real_mults else 0,
+        rugged_count=rugged,
+    )
