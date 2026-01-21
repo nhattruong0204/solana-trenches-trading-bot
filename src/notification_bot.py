@@ -1252,7 +1252,7 @@ class NotificationBot:
         # Progress callback
         async def update_progress(current: int, total: int):
             try:
-                await self._bot_client.edit_message(
+                await self._client.edit_message(
                     self._admin_chat_id,
                     progress_msg.id,
                     f"🔍 Fetching live prices from DexScreener...\n"
@@ -1411,7 +1411,7 @@ class NotificationBot:
         # Progress callback
         async def update_progress(current: int, total: int):
             try:
-                await self._bot_client.edit_message(
+                await self._client.edit_message(
                     self._admin_chat_id,
                     progress_msg.id,
                     f"🔍 Fetching live prices from DexScreener...\n"
@@ -1671,15 +1671,18 @@ class NotificationBot:
                 return
             
             # Update progress
-            await self._bot_client.edit_message(
-                self._admin_chat_id,
-                progress_msg.id,
-                f"🎯 *Running Accurate Backtest*\n\n"
-                f"• Period: {period_label}\n"
-                f"• Signals: {len(signals)}\n\n"
-                f"⏳ Step 2/3: Fetching OHLCV candles from GeckoTerminal...\n"
-                f"(This may take a few minutes for many tokens)"
-            )
+            try:
+                await self._client.edit_message(
+                    self._admin_chat_id,
+                    progress_msg.id,
+                    f"🎯 *Running Accurate Backtest*\n\n"
+                    f"• Period: {period_label}\n"
+                    f"• Signals: {len(signals)}\n\n"
+                    f"⏳ Step 2/3: Fetching OHLCV candles from GeckoTerminal...\n"
+                    f"(This may take a few minutes for many tokens)"
+                )
+            except:
+                pass
             
             # Build signal list for backtester
             signal_list = [
@@ -1689,8 +1692,8 @@ class NotificationBot:
                     "signal_timestamp": swp.signal.timestamp.isoformat(),
                     "initial_fdv": swp.signal.initial_fdv,
                     "signal": {
-                        "has_profit_alert": swp.has_profit_alert,
-                        "multiplier": swp.highest_multiplier,
+                        "has_profit_alert": swp.has_profit,
+                        "multiplier": swp.max_multiplier,
                     },
                     "real": {
                         "multiplier": None,  # Will be fetched
@@ -1704,7 +1707,7 @@ class NotificationBot:
             fetch_progress = [0]
             async def update_progress(msg: str):
                 try:
-                    await self._bot_client.edit_message(
+                    await self._client.edit_message(
                         self._admin_chat_id,
                         progress_msg.id,
                         f"🎯 *Running Accurate Backtest*\n\n"
@@ -1731,15 +1734,18 @@ class NotificationBot:
                 return
             
             # Update to show completion
-            await self._bot_client.edit_message(
-                self._admin_chat_id,
-                progress_msg.id,
-                f"🎯 *Accurate Backtest Complete*\n\n"
-                f"• Period: {period_label}\n"
-                f"• Signals: {len(signals)}\n"
-                f"• Data Coverage: {results[0].data_coverage_pct:.1f}%\n\n"
-                f"✅ Sending report..."
-            )
+            try:
+                await self._client.edit_message(
+                    self._admin_chat_id,
+                    progress_msg.id,
+                    f"🎯 *Accurate Backtest Complete*\n\n"
+                    f"• Period: {period_label}\n"
+                    f"• Signals: {len(signals)}\n"
+                    f"• Data Coverage: {results[0].data_coverage_pct:.1f}%\n\n"
+                    f"✅ Sending report..."
+                )
+            except:
+                pass
             
             # Send report in chunks
             max_len = 3800
