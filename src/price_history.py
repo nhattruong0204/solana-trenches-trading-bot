@@ -7,7 +7,7 @@ Uses GeckoTerminal API (free, no API key required).
 import asyncio
 import logging
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 import httpx
 
@@ -18,6 +18,13 @@ GECKO_TERMINAL_API = "https://api.geckoterminal.com/api/v2"
 
 # Rate limit: 30 requests per minute for free tier
 RATE_LIMIT_DELAY = 2.5  # seconds between requests
+
+
+def make_naive(dt: datetime) -> datetime:
+    """Convert datetime to naive (remove timezone info) for comparison."""
+    if dt.tzinfo is not None:
+        return dt.replace(tzinfo=None)
+    return dt
 
 
 @dataclass
@@ -57,18 +64,21 @@ class PriceHistory:
     
     def get_candles_after(self, after: datetime) -> list[Candle]:
         """Get candles after a specific timestamp."""
-        return [c for c in self.candles if c.timestamp >= after]
+        after_naive = make_naive(after)
+        return [c for c in self.candles if c.timestamp >= after_naive]
     
     def get_price_at(self, timestamp: datetime) -> Optional[float]:
         """Get the close price at or just before a timestamp."""
-        valid = [c for c in self.candles if c.timestamp <= timestamp]
+        ts_naive = make_naive(timestamp)
+        valid = [c for c in self.candles if c.timestamp <= ts_naive]
         if not valid:
             return None
         return max(valid, key=lambda c: c.timestamp).close
     
     def get_high_after(self, timestamp: datetime) -> Optional[float]:
         """Get the highest price after a timestamp."""
-        valid = [c for c in self.candles if c.timestamp >= timestamp]
+        ts_naive = make_naive(timestamp)
+        valid = [c for c in self.candles if c.timestamp >= ts_naive]
         if not valid:
             return None
         return max(c.high for c in valid)
@@ -95,7 +105,8 @@ class PriceHistory:
             - exit_reason: "trailing_stop", "time_exit", "still_open"
             - exit_time: When we exited
         """
-        candles = self.get_candles_after(entry_time)
+        entry_time_naive = make_naive(entry_time)
+        candles = self.get_candles_after(entry_time_naive)
         if not candles:
             return None, "no_data", None
         
@@ -104,7 +115,7 @@ class PriceHistory:
         
         peak_price = entry_price
         stop_price = entry_price * (1 - trailing_pct)
-        max_hold_time = entry_time + timedelta(hours=max_hold_hours)
+        max_hold_time = entry_time_naive + timedelta(hours=max_hold_hours)
         
         for candle in candles:
             # Check time limit
@@ -141,7 +152,8 @@ class PriceHistory:
         Returns:
             (exit_multiplier, exit_reason, exit_time)
         """
-        candles = self.get_candles_after(entry_time)
+        entry_time_naive = make_naive(entry_time)
+        candles = self.get_candles_after(entry_time_naive)
         if not candles:
             return None, "no_data", None
         
@@ -149,7 +161,7 @@ class PriceHistory:
         
         target_price = entry_price * target_mult
         stop_price = entry_price * stop_loss_mult
-        max_hold_time = entry_time + timedelta(hours=max_hold_hours)
+        max_hold_time = entry_time_naive + timedelta(hours=max_hold_hours)
         
         for candle in candles:
             # Check time limit
@@ -190,12 +202,13 @@ class PriceHistory:
             (weighted_exit_mult, exit_reason, exits_list)
             exits_list: [(mult, portion, time), ...]
         """
-        candles = self.get_candles_after(entry_time)
+        entry_time_naive = make_naive(entry_time)
+        candles = self.get_candles_after(entry_time_naive)
         if not candles:
             return 1.0, "no_data", []
         
         candles = sorted(candles, key=lambda c: c.timestamp)
-        max_hold_time = entry_time + timedelta(hours=max_hold_hours)
+        max_hold_time = entry_time_naive + timedelta(hours=max_hold_hours)
         
         remaining_pct = 1.0
         exits: list[tuple[float, float, datetime]] = []

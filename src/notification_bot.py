@@ -1065,7 +1065,20 @@ class NotificationBot:
         await self._send_to_admin(message)
     
     async def _cmd_signal_pnl(self, args: str) -> None:
-        """Show PnL statistics for signals from the channel (from database)."""
+        """
+        Show PnL statistics for signals from the channel (from database profit alerts).
+        
+        Usage: /signalpnl [days] [position_size]
+        Examples:
+            /signalpnl 7        - Last 7 days with 1 SOL per trade
+            /signalpnl 7 0.5    - Last 7 days with 0.5 SOL per trade
+            /signalpnl all 0.1  - All time with 0.1 SOL per trade
+        """
+        # GMGN Fee structure: 1% platform + 0.5% priority + 1% slippage = 2.5% each way
+        BUY_FEE_PCT = 2.5
+        SELL_FEE_PCT = 2.5
+        DEFAULT_POSITION_SIZE = 1.0
+        
         # Check if database is available
         if not self._signal_db:
             await self._send_to_admin(
@@ -1079,112 +1092,226 @@ class NotificationBot:
             )
             return
         
-        # Parse period argument
-        arg = args.strip().lower() if args else "all"
+        # Parse arguments: [days] [position_size]
+        parts = args.strip().split() if args else []
+        days = None
+        position_size = DEFAULT_POSITION_SIZE
         
-        # Handle "all" or "lifetime" for all-time stats
-        if arg in ("all", "lifetime"):
-            days = None
-        else:
-            # Try to parse as number of days
-            # Support formats: "7", "7d", "7days"
-            numeric_arg = arg.replace("d", "").replace("days", "").replace("day", "")
-            try:
-                days = int(numeric_arg)
-                if days <= 0:
+        # Parse first argument (days)
+        if len(parts) >= 1:
+            arg = parts[0].lower()
+            if arg in ("all", "lifetime"):
+                days = None
+            else:
+                numeric_arg = arg.replace("d", "").replace("days", "").replace("day", "")
+                try:
+                    days = int(numeric_arg)
+                    if days <= 0:
+                        await self._send_to_admin(
+                            "❌ *Invalid period*\n\n"
+                            "Usage: `/signalpnl [days] [position_size]`\n\n"
+                            "Examples:\n"
+                            "• `/signalpnl 7` - Last 7 days, 1 SOL/trade\n"
+                            "• `/signalpnl 7 0.5` - Last 7 days, 0.5 SOL/trade\n"
+                            "• `/signalpnl all 0.1` - All time, 0.1 SOL/trade"
+                        )
+                        return
+                except ValueError:
                     await self._send_to_admin(
                         "❌ *Invalid period*\n\n"
-                        "Please enter a positive number of days.\n\n"
-                        "Examples: `/signalpnl 7`, `/signalpnl 30`, `/signalpnl all`"
+                        "Usage: `/signalpnl [days] [position_size]`\n\n"
+                        "Examples:\n"
+                        "• `/signalpnl 7` - Last 7 days, 1 SOL/trade\n"
+                        "• `/signalpnl 7 0.5` - Last 7 days, 0.5 SOL/trade\n"
+                        "• `/signalpnl all 0.1` - All time, 0.1 SOL/trade"
                     )
                     return
+        
+        # Parse second argument (position size)
+        if len(parts) >= 2:
+            try:
+                position_size = float(parts[1])
+                if position_size <= 0:
+                    position_size = DEFAULT_POSITION_SIZE
             except ValueError:
-                await self._send_to_admin(
-                    "❌ *Invalid period*\n\n"
-                    "Usage: /signalpnl `<days>` or `/signalpnl all`\n\n"
-                    "Examples:\n"
-                    "• `/signalpnl 7` - Last 7 days\n"
-                    "• `/signalpnl 30` - Last 30 days\n"
-                    "• `/signalpnl all` - All time"
-                )
-                return
+                pass  # Use default
+        
+        period_label = f"Last {days} Day{'s' if days != 1 else ''}" if days else "All Time"
         
         await self._send_to_admin(f"⏳ Querying signal database...")
         
-        # Query database for PnL stats
-        stats = await self._signal_db.calculate_pnl_stats(days)
+        # Get signals with profit data
+        signals = await self._signal_db.get_signals_in_period(days)
         
-        if stats.total_signals == 0:
+        if not signals:
             await self._send_to_admin(
                 f"📭 *No signals found*\n\n"
-                f"Period: {stats.period_label}\n\n"
+                f"Period: {period_label}\n\n"
                 "Make sure the database has signal data."
             )
             return
         
-        # Build message
-        win_emoji = "🟢" if stats.win_rate >= 50 else "🔴"
-        pnl_emoji = "🟢" if stats.total_pnl_percent >= 0 else "🔴"
+        # Calculate SOL profits for each signal
+        token_results = []
+        total_invested_sol = 0.0
+        total_returned_sol = 0.0
+        total_buy_fees = 0.0
+        total_sell_fees = 0.0
+        
+        for s in signals:
+            mult = s.max_multiplier if s.has_profit else 0
+            
+            # Calculate with fees
+            invested = position_size
+            if mult == 0:
+                # No profit alert = assume total loss (lost all including buy fee)
+                returned = 0.0
+                sol_profit = -position_size
+                buy_fee = position_size * (BUY_FEE_PCT / 100)
+                sell_fee = 0.0  # Never sold
+            else:
+                # Buy: position - fee
+                buy_fee = position_size * (BUY_FEE_PCT / 100)
+                tokens_value = position_size - buy_fee
+                # Tokens grow by multiplier
+                sell_value = tokens_value * mult
+                # Sell: deduct fee
+                sell_fee = sell_value * (SELL_FEE_PCT / 100)
+                returned = sell_value - sell_fee
+                sol_profit = returned - invested
+            
+            total_invested_sol += invested
+            total_returned_sol += returned
+            total_buy_fees += buy_fee
+            total_sell_fees += sell_fee
+            
+            token_results.append({
+                'signal': s,
+                'multiplier': mult,
+                'sol_profit': sol_profit,
+                'invested': invested,
+                'returned': returned,
+            })
+        
+        # Sort by SOL profit (descending - best first)
+        token_results.sort(key=lambda x: x['sol_profit'], reverse=True)
+        
+        # Calculate totals
+        total_sol_profit = total_returned_sol - total_invested_sol
+        total_pnl_pct = (total_sol_profit / total_invested_sol * 100) if total_invested_sol > 0 else 0
+        total_fees = total_buy_fees + total_sell_fees
+        fee_pct_of_invested = (total_fees / total_invested_sol * 100) if total_invested_sol > 0 else 0
+        
+        # Profit before fees (gross profit)
+        gross_profit = total_sol_profit + total_fees
+        gross_pnl_pct = (gross_profit / total_invested_sol * 100) if total_invested_sol > 0 else 0
+        
+        # Stats
+        total = len(signals)
+        with_profit = [s for s in signals if s.has_profit]
+        losers = [s for s in signals if not s.has_profit]
+        win_rate = (len(with_profit) / total * 100) if total > 0 else 0
+        
+        win_emoji = "🟢" if win_rate >= 50 else "🔴"
+        pnl_emoji = "🟢" if total_sol_profit >= 0 else "🔴"
         
         # Date range
-        date_range = ""
-        if stats.start_date and stats.end_date:
-            date_range = f"📅 `{stats.start_date.strftime('%Y-%m-%d')}` to `{stats.end_date.strftime('%Y-%m-%d')}`\n\n"
+        timestamps = [s.signal.timestamp for s in signals]
+        start_date = min(timestamps) if timestamps else None
+        end_date = max(timestamps) if timestamps else None
         
-        message = (
-            f"📊 *SIGNAL PnL - {stats.period_label}*\n\n"
+        date_range = ""
+        if start_date and end_date:
+            date_range = f"📅 `{start_date.strftime('%Y-%m-%d')}` to `{end_date.strftime('%Y-%m-%d')}`\n\n"
+        
+        header_message = (
+            f"📊 *Signal PnL* - {period_label}\n\n"
             f"{date_range}"
+            f"💰 *SOL Performance ({position_size} SOL/trade)*\n"
+            f"• Total Invested: `{total_invested_sol:.2f}` SOL\n"
+            f"• Total Returned: `{total_returned_sol:.2f}` SOL\n"
+            f"• {pnl_emoji} Net Profit: `{total_sol_profit:+.2f}` SOL ({total_pnl_pct:+.1f}%)\n\n"
+            f"💸 *Fee Breakdown (GMGN)*\n"
+            f"• Buy Fees (2.5%): `{total_buy_fees:.2f}` SOL\n"
+            f"• Sell Fees (2.5%): `{total_sell_fees:.2f}` SOL\n"
+            f"• Total Fees: `{total_fees:.2f}` SOL ({fee_pct_of_invested:.1f}% of invested)\n"
+            f"• Gross Profit: `{gross_profit:+.2f}` SOL ({gross_pnl_pct:+.1f}%)\n\n"
             f"📈 *Overview*\n"
-            f"• Total Signals: `{stats.total_signals}`\n"
-            f"• With Profit: `{stats.signals_with_profit}`\n"
-            f"• Reached 2X: `{stats.signals_reached_2x}`\n"
-            f"• Losers: `{stats.losing_signals}`\n"
-            f"• {win_emoji} Win Rate: `{stats.win_rate:.1f}%`\n"
-            f"• Win Rate (2X+): `{stats.win_rate_2x:.1f}%`\n\n"
-            f"💰 *Performance*\n"
-            f"• {pnl_emoji} Avg PnL: `{stats.total_pnl_percent:+.1f}%`\n"
-            f"• Avg Mult: `{stats.avg_multiplier:.2f}X`\n"
-            f"• Best: `{stats.best_multiplier:.2f}X`\n"
-            f"• Worst: `{stats.worst_multiplier:.2f}X`\n"
+            f"• Total Signals: `{total}`\n"
+            f"• With Profit Alert: `{len(with_profit)}`\n"
+            f"• No Profit Alert: `{len(losers)}`\n\n"
+            f"📊 *Win/Loss*\n"
+            f"• {win_emoji} Win Rate: `{win_rate:.1f}%`\n"
+            f"• Winners: `{len(with_profit)}`\n"
+            f"• Losers: `{len(losers)}`\n"
         )
         
-        # Add top performers
-        if stats.top_performers:
-            message += "\n🏆 *Top Performers*\n"
-            for i, s in enumerate(stats.top_performers, 1):
-                mult = s.max_multiplier
-                pnl = s.pnl_percent
-                message += f"{i}. `${s.signal.token_symbol}` - `{mult:.2f}X` ({pnl:+.1f}%)\n"
+        # Send header first
+        await self._send_to_admin(header_message)
         
-        # Add worst performers (from winners only)
-        if stats.worst_performers:
-            message += "\n📉 *Smallest Wins*\n"
-            for i, s in enumerate(stats.worst_performers, 1):
-                mult = s.max_multiplier
-                pnl = s.pnl_percent
-                message += f"{i}. `${s.signal.token_symbol}` - `{mult:.2f}X` ({pnl:+.1f}%)\n"
+        # Build token list in chunks (Telegram limit is ~4096 chars)
+        MAX_MESSAGE_LENGTH = 3800
         
-        # Add losers (no profit alerts = -100%)
-        if stats.loser_signals:
-            message += "\n💀 *Losers (No Profit Alert)*\n"
-            for i, s in enumerate(stats.loser_signals, 1):
-                age = s.signal.age_hours
-                if age < 24:
-                    age_str = f"{age:.1f}h ago"
-                else:
-                    age_str = f"{age/24:.1f}d ago"
-                message += f"{i}. `${s.signal.token_symbol}` - ❌ (-100%) - {age_str}\n"
+        token_lines = []
+        for i, tr in enumerate(token_results, 1):
+            s = tr['signal']
+            sol_profit = tr['sol_profit']
+            mult = tr['multiplier']
+            token_address = s.signal.token_address
+            
+            # Build links
+            dex_link = f"https://dexscreener.com/solana/{token_address}"
+            gmgn_link = f"https://gmgn.ai/sol/token/{token_address}"
+            
+            if mult == 0:
+                emoji = "💀"
+                mult_str = f"[N/A]({dex_link})"
+            elif mult >= 10:
+                emoji = "🚀"
+                mult_str = f"[{mult:.2f}X]({dex_link})"
+            elif mult >= 2:
+                emoji = "🟢"
+                mult_str = f"[{mult:.2f}X]({dex_link})"
+            elif mult >= 1:
+                emoji = "🟡"
+                mult_str = f"[{mult:.2f}X]({dex_link})"
+            else:
+                emoji = "🔴"
+                mult_str = f"[{mult:.2f}X]({dex_link})"
+            
+            profit_emoji = "🟢" if sol_profit >= 0 else "🔴"
+            line = f"{i}. `${s.signal.token_symbol}` {emoji} {mult_str} | [G]({gmgn_link}) → {profit_emoji}`{sol_profit:+.3f}` SOL\n"
+            token_lines.append(line)
         
-        await self._send_to_admin(message)
+        # Send token list in chunks
+        current_message = "📋 *All Tokens (Best → Worst)*\n"
+        for line in token_lines:
+            if len(current_message) + len(line) > MAX_MESSAGE_LENGTH:
+                await self._send_to_admin(current_message)
+                current_message = ""
+            current_message += line
+        
+        if current_message:
+            await self._send_to_admin(current_message)
     
     async def _cmd_real_pnl(self, args: str) -> None:
         """
         Calculate REAL-TIME PnL by fetching current market cap from DexScreener.
         
-        Unlike /signalpnl which uses recorded profit alerts,
-        this command fetches live prices to calculate actual current PnL.
+        Shows all tokens sorted from best to worst profit with SOL calculations.
+        
+        Usage: /realpnl [days] [position_size]
+        Examples:
+            /realpnl 7        - Last 7 days with 1 SOL per trade
+            /realpnl 7 0.5    - Last 7 days with 0.5 SOL per trade
+            /realpnl all 0.1  - All time with 0.1 SOL per trade
         """
         from src.signal_database import calculate_real_pnl
+        
+        # GMGN Fee structure: 1% platform + 0.5% priority + 1% slippage = 2.5% each way
+        BUY_FEE_PCT = 2.5
+        SELL_FEE_PCT = 2.5
+        DEFAULT_POSITION_SIZE = 1.0
         
         # Check if database is available
         if not self._signal_db:
@@ -1199,36 +1326,51 @@ class NotificationBot:
             )
             return
         
-        # Parse period argument
-        arg = args.strip().lower() if args else "all"
+        # Parse arguments: [days] [position_size]
+        parts = args.strip().split() if args else []
+        days = None
+        position_size = DEFAULT_POSITION_SIZE
         
-        # Handle "all" or "lifetime" for all-time stats
-        if arg in ("all", "lifetime"):
-            days = None
-            period_label = "All Time"
-        else:
-            # Try to parse as number of days
-            numeric_arg = arg.replace("d", "").replace("days", "").replace("day", "")
-            try:
-                days = int(numeric_arg)
-                if days <= 0:
+        # Parse first argument (days)
+        if len(parts) >= 1:
+            arg = parts[0].lower()
+            if arg in ("all", "lifetime"):
+                days = None
+            else:
+                numeric_arg = arg.replace("d", "").replace("days", "").replace("day", "")
+                try:
+                    days = int(numeric_arg)
+                    if days <= 0:
+                        await self._send_to_admin(
+                            "❌ *Invalid period*\n\n"
+                            "Usage: `/realpnl [days] [position_size]`\n\n"
+                            "Examples:\n"
+                            "• `/realpnl 7` - Last 7 days, 1 SOL/trade\n"
+                            "• `/realpnl 7 0.5` - Last 7 days, 0.5 SOL/trade\n"
+                            "• `/realpnl all 0.1` - All time, 0.1 SOL/trade"
+                        )
+                        return
+                except ValueError:
                     await self._send_to_admin(
                         "❌ *Invalid period*\n\n"
-                        "Please enter a positive number of days.\n\n"
-                        "Examples: `/realpnl 7`, `/realpnl 30`, `/realpnl all`"
+                        "Usage: `/realpnl [days] [position_size]`\n\n"
+                        "Examples:\n"
+                        "• `/realpnl 7` - Last 7 days, 1 SOL/trade\n"
+                        "• `/realpnl 7 0.5` - Last 7 days, 0.5 SOL/trade\n"
+                        "• `/realpnl all 0.1` - All time, 0.1 SOL/trade"
                     )
                     return
-                period_label = f"Last {days} Days"
+        
+        # Parse second argument (position size)
+        if len(parts) >= 2:
+            try:
+                position_size = float(parts[1])
+                if position_size <= 0:
+                    position_size = DEFAULT_POSITION_SIZE
             except ValueError:
-                await self._send_to_admin(
-                    "❌ *Invalid period*\n\n"
-                    "Usage: /realpnl `<days>` or `/realpnl all`\n\n"
-                    "Examples:\n"
-                    "• `/realpnl 7` - Last 7 days\n"
-                    "• `/realpnl 30` - Last 30 days\n"
-                    "• `/realpnl all` - All time"
-                )
-                return
+                pass  # Use default
+        
+        period_label = f"Last {days} Days" if days else "All Time"
         
         # Get signals
         await self._send_to_admin(f"⏳ Fetching signals from database...")
@@ -1266,19 +1408,82 @@ class NotificationBot:
         stats = await calculate_real_pnl(signals, update_progress)
         stats.period_label = period_label
         
+        # Calculate SOL profits for each result
+        token_results = []
+        total_invested_sol = 0.0
+        total_returned_sol = 0.0
+        total_buy_fees = 0.0
+        total_sell_fees = 0.0
+        
+        for r in stats.results:
+            if r.multiplier is None or r.is_rugged:
+                # Rugged or no price = total loss (lost all including buy fee)
+                invested = position_size
+                returned = 0.0
+                sol_profit = -position_size
+                buy_fee = position_size * (BUY_FEE_PCT / 100)
+                sell_fee = 0.0  # Never sold
+            else:
+                # Calculate with fees
+                invested = position_size
+                buy_fee = position_size * (BUY_FEE_PCT / 100)
+                tokens_value = position_size - buy_fee  # After buy fee
+                
+                # Tokens grow by multiplier
+                sell_value = tokens_value * r.multiplier
+                
+                # Sell: deduct 2.5% fee
+                sell_fee = sell_value * (SELL_FEE_PCT / 100)
+                returned = sell_value - sell_fee
+                sol_profit = returned - invested
+            
+            total_invested_sol += invested
+            total_returned_sol += returned
+            total_buy_fees += buy_fee
+            total_sell_fees += sell_fee
+            
+            token_results.append({
+                'result': r,
+                'sol_profit': sol_profit,
+                'invested': invested,
+                'returned': returned,
+            })
+        
+        # Sort by SOL profit (descending - best first)
+        token_results.sort(key=lambda x: x['sol_profit'], reverse=True)
+        
+        # Calculate totals
+        total_sol_profit = total_returned_sol - total_invested_sol
+        total_pnl_pct = (total_sol_profit / total_invested_sol * 100) if total_invested_sol > 0 else 0
+        total_fees = total_buy_fees + total_sell_fees
+        fee_pct_of_invested = (total_fees / total_invested_sol * 100) if total_invested_sol > 0 else 0
+        
         # Build results message
         win_rate = (stats.winners / stats.successful_fetches * 100) if stats.successful_fetches else 0
         win_emoji = "🟢" if win_rate >= 50 else "🔴"
-        pnl_emoji = "🟢" if stats.avg_pnl_percent >= 0 else "🔴"
+        pnl_emoji = "🟢" if total_sol_profit >= 0 else "🔴"
         
         # Date range
         date_range = ""
         if stats.start_date and stats.end_date:
             date_range = f"📅 `{stats.start_date.strftime('%Y-%m-%d')}` to `{stats.end_date.strftime('%Y-%m-%d')}`\n\n"
         
-        message = (
+        # Profit before fees (gross profit)
+        gross_profit = total_sol_profit + total_fees
+        gross_pnl_pct = (gross_profit / total_invested_sol * 100) if total_invested_sol > 0 else 0
+        
+        header_message = (
             f"📊 *Real-Time PnL* - {period_label}\n\n"
             f"{date_range}"
+            f"💰 *SOL Performance ({position_size} SOL/trade)*\n"
+            f"• Total Invested: `{total_invested_sol:.2f}` SOL\n"
+            f"• Total Returned: `{total_returned_sol:.2f}` SOL\n"
+            f"• {pnl_emoji} Net Profit: `{total_sol_profit:+.2f}` SOL ({total_pnl_pct:+.1f}%)\n\n"
+            f"💸 *Fee Breakdown (GMGN)*\n"
+            f"• Buy Fees (2.5%): `{total_buy_fees:.2f}` SOL\n"
+            f"• Sell Fees (2.5%): `{total_sell_fees:.2f}` SOL\n"
+            f"• Total Fees: `{total_fees:.2f}` SOL ({fee_pct_of_invested:.1f}% of invested)\n"
+            f"• Gross Profit: `{gross_profit:+.2f}` SOL ({gross_pnl_pct:+.1f}%)\n\n"
             f"📈 *Overview*\n"
             f"• Total Signals: `{stats.total_signals}`\n"
             f"• Priced OK: `{stats.successful_fetches}`\n"
@@ -1286,44 +1491,52 @@ class NotificationBot:
             f"📊 *Win/Loss*\n"
             f"• {win_emoji} Win Rate: `{win_rate:.1f}%`\n"
             f"• Winners (≥1X): `{stats.winners}`\n"
-            f"• Losers (<1X): `{stats.losers}`\n\n"
-            f"💰 *Performance*\n"
-            f"• {pnl_emoji} Avg PnL: `{stats.avg_pnl_percent:+.1f}%`\n"
-            f"• Avg Mult: `{stats.avg_multiplier:.2f}X`\n"
-            f"• Best: `{stats.best_multiplier:.2f}X`\n"
-            f"• Worst: `{stats.worst_multiplier:.2f}X`\n"
+            f"• Losers (<1X): `{stats.losers}`\n"
         )
         
-        # Add top performers
-        if stats.top_performers:
-            message += "\n🏆 *Top Performers (Current)*\n"
-            for i, r in enumerate(stats.top_performers[:15], 1):
-                mult = r.multiplier or 0
-                pnl = r.pnl_percent or 0
+        # Send header first
+        await self._send_to_admin(header_message)
+        
+        # Build token list in chunks (Telegram limit is ~4096 chars)
+        MAX_MESSAGE_LENGTH = 3800  # Leave some buffer
+        
+        token_lines = []
+        for i, tr in enumerate(token_results, 1):
+            r = tr['result']
+            sol_profit = tr['sol_profit']
+            mult = r.multiplier or 0
+            token_address = r.signal.token_address
+            
+            # Build links
+            dex_link = f"https://dexscreener.com/solana/{token_address}"
+            gmgn_link = f"https://gmgn.ai/sol/token/{token_address}"
+            
+            if r.is_rugged:
+                emoji = "💀"
+                mult_str = f"[RUG]({dex_link})"
+            elif mult == 0 or r.multiplier is None:
+                emoji = "❓"
+                mult_str = f"[N/A]({dex_link})"
+            else:
                 emoji = r.status_emoji
-                message += f"{i}. `${r.signal.token_symbol}` {emoji} `{mult:.2f}X` ({pnl:+.1f}%)\n"
+                mult_str = f"[{mult:.2f}X]({dex_link})"
+            
+            profit_emoji = "🟢" if sol_profit >= 0 else "🔴"
+            line = f"{i}. `${r.signal.token_symbol}` {emoji} {mult_str} | [G]({gmgn_link}) → {profit_emoji}`{sol_profit:+.3f}` SOL\n"
+            token_lines.append(line)
         
-        # Add worst performers
-        if stats.worst_performers:
-            message += "\n📉 *Worst Performers (Current)*\n"
-            for i, r in enumerate(stats.worst_performers[:15], 1):
-                mult = r.multiplier or 0
-                pnl = r.pnl_percent or 0
-                emoji = r.status_emoji
-                message += f"{i}. `${r.signal.token_symbol}` {emoji} `{mult:.2f}X` ({pnl:+.1f}%)\n"
+        # Send token list in chunks
+        current_message = "📋 *All Tokens (Best → Worst)*\n"
+        for line in token_lines:
+            if len(current_message) + len(line) > MAX_MESSAGE_LENGTH:
+                # Send current chunk
+                await self._send_to_admin(current_message)
+                current_message = ""  # Start new chunk without header
+            current_message += line
         
-        # Add rugged tokens
-        if stats.rugged_tokens:
-            message += "\n💀 *Rugged Tokens*\n"
-            for i, r in enumerate(stats.rugged_tokens[:10], 1):
-                age = r.signal.age_hours
-                if age < 24:
-                    age_str = f"{age:.1f}h ago"
-                else:
-                    age_str = f"{age/24:.1f}d ago"
-                message += f"{i}. `${r.signal.token_symbol}` - {age_str}\n"
-        
-        await self._send_to_admin(message)
+        # Send remaining
+        if current_message:
+            await self._send_to_admin(current_message)
     
     async def _prompt_custom_days_realpnl(self) -> None:
         """Prompt user to enter custom days for real PnL calculation."""
@@ -1878,13 +2091,13 @@ class NotificationBot:
                 f"• Fetching messages after this ID..."
             )
             
-            # Signal detection patterns
+            # Signal detection patterns (handle backticks and // prefix)
             import re
-            SIGNAL_PATTERN = re.compile(r'VOLUME \+ SM APE SIGNAL DETECTED|APE SIGNAL DETECTED', re.IGNORECASE)
+            SIGNAL_PATTERN = re.compile(r'VOLUME\s*\+\s*SM\s*APE\s*SIGNAL\s*DETECTED|APE\s*SIGNAL\s*DETECTED', re.IGNORECASE)
             TOKEN_PATTERN = re.compile(r'\$([A-Z0-9]{2,10})')
             ADDRESS_PATTERN = re.compile(r'[1-9A-HJ-NP-Za-km-z]{32,44}')
             MULTIPLIER_PATTERN = re.compile(r'(\d+(?:\.\d+)?)\s*[xX]', re.IGNORECASE)
-            PROFIT_ALERT_PATTERN = re.compile(r'PROFIT ALERT|X PROFIT|hit \d+\.?\d*x', re.IGNORECASE)
+            PROFIT_ALERT_PATTERN = re.compile(r'PROFIT\s*ALERT|X\s*PROFIT|hit\s+\d+\.?\d*x', re.IGNORECASE)
             
             # Fetch ONLY messages AFTER the cursor (incremental)
             messages_to_process = []
@@ -2040,13 +2253,13 @@ class NotificationBot:
                 "You'll receive progress updates every 1000 messages."
             )
             
-            # Signal detection patterns
+            # Signal detection patterns (handle backticks and // prefix)
             import re
-            SIGNAL_PATTERN = re.compile(r'VOLUME \+ SM APE SIGNAL DETECTED|APE SIGNAL DETECTED', re.IGNORECASE)
+            SIGNAL_PATTERN = re.compile(r'VOLUME\s*\+\s*SM\s*APE\s*SIGNAL\s*DETECTED|APE\s*SIGNAL\s*DETECTED', re.IGNORECASE)
             TOKEN_PATTERN = re.compile(r'\$([A-Z0-9]{2,10})')
             ADDRESS_PATTERN = re.compile(r'[1-9A-HJ-NP-Za-km-z]{32,44}')
             MULTIPLIER_PATTERN = re.compile(r'(\d+(?:\.\d+)?)\s*[xX]', re.IGNORECASE)
-            PROFIT_ALERT_PATTERN = re.compile(r'PROFIT ALERT|X PROFIT|hit \d+\.?\d*x', re.IGNORECASE)
+            PROFIT_ALERT_PATTERN = re.compile(r'PROFIT\s*ALERT|X\s*PROFIT|hit\s+\d+\.?\d*x', re.IGNORECASE)
             
             # Fetch ALL messages from channel history
             messages_to_process = []
@@ -2180,12 +2393,17 @@ class NotificationBot:
             if signal_time is None:
                 signal_time = datetime.now(timezone.utc)
             
+            # Require raw_text for proper DB storage - don't use placeholder
+            if not raw_text:
+                logger.warning(f"No raw_text provided for signal ${token_symbol}, skipping DB insert")
+                return
+            
             inserted = await self._signal_db.insert_signal(
                 message_id=message_id,
                 token_symbol=token_symbol,
                 token_address=token_address,
                 signal_time=signal_time,
-                raw_text=raw_text or f"${token_symbol} signal",
+                raw_text=raw_text,
             )
             
             if inserted:

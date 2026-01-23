@@ -421,8 +421,8 @@ class TradingBot:
                 token_address=signal.token_address,
                 token_symbol=signal.token_symbol,
                 message_id=signal.message_id,
-                signal_time=signal.timestamp if hasattr(signal, 'timestamp') else None,
-                raw_text=signal.raw_text if hasattr(signal, 'raw_text') else None,
+                signal_time=signal.timestamp,
+                raw_text=signal.raw_text,
                 channel_id=self._channel_entity.id if self._channel_entity else None,
             )
         

@@ -22,7 +22,8 @@ from src.price_history import (
     PriceHistory, 
     PriceHistoryFetcher, 
     get_price_fetcher,
-    Candle
+    Candle,
+    make_naive
 )
 from src.strategy_simulator import (
     TradingFees, 
@@ -263,11 +264,11 @@ class AccurateBacktester:
             address = signal.get("address", "")
             symbol = signal.get("symbol", "UNKNOWN")
             
-            # Parse entry time
+            # Parse entry time (convert to naive for comparison)
             try:
-                entry_time = datetime.fromisoformat(
+                entry_time = make_naive(datetime.fromisoformat(
                     signal.get("signal_timestamp", "").replace("Z", "+00:00")
-                )
+                ))
             except:
                 entry_time = datetime.now() - timedelta(days=7)
             
@@ -299,6 +300,10 @@ class AccurateBacktester:
                 max_hold_hours=self.config.max_hold_hours
             )
             
+            # Calculate peak multiplier safely
+            high_after = history.get_high_after(entry_time)
+            peak_mult = (high_after / entry_price) if (high_after and entry_price) else 1.0
+            
             # Create trade
             trade = BacktestTrade(
                 symbol=symbol,
@@ -309,7 +314,7 @@ class AccurateBacktester:
                 exit_price=entry_price * exit_mult if exit_mult else None,
                 exit_reason=self._map_exit_reason(exit_reason),
                 exit_multiplier=exit_mult,
-                peak_multiplier=history.get_high_after(entry_time) / entry_price if entry_price else 1.0,
+                peak_multiplier=peak_mult,
                 position_size=self.config.position_size,
                 fees=self.config.fees,
             )
@@ -346,9 +351,9 @@ class AccurateBacktester:
             symbol = signal.get("symbol", "UNKNOWN")
             
             try:
-                entry_time = datetime.fromisoformat(
+                entry_time = make_naive(datetime.fromisoformat(
                     signal.get("signal_timestamp", "").replace("Z", "+00:00")
-                )
+                ))
             except:
                 entry_time = datetime.now() - timedelta(days=7)
             
@@ -426,9 +431,9 @@ class AccurateBacktester:
             symbol = signal.get("symbol", "UNKNOWN")
             
             try:
-                entry_time = datetime.fromisoformat(
+                entry_time = make_naive(datetime.fromisoformat(
                     signal.get("signal_timestamp", "").replace("Z", "+00:00")
-                )
+                ))
             except:
                 entry_time = datetime.now() - timedelta(days=7)
             
@@ -503,9 +508,9 @@ class AccurateBacktester:
         symbol = signal.get("symbol", "UNKNOWN")
         
         try:
-            entry_time = datetime.fromisoformat(
+            entry_time = make_naive(datetime.fromisoformat(
                 signal.get("signal_timestamp", "").replace("Z", "+00:00")
-            )
+            ))
         except:
             entry_time = datetime.now() - timedelta(days=7)
         
@@ -550,9 +555,9 @@ class AccurateBacktester:
         symbol = signal.get("symbol", "UNKNOWN")
         
         try:
-            entry_time = datetime.fromisoformat(
+            entry_time = make_naive(datetime.fromisoformat(
                 signal.get("signal_timestamp", "").replace("Z", "+00:00")
-            )
+            ))
         except:
             entry_time = datetime.now() - timedelta(days=7)
         
@@ -596,9 +601,9 @@ class AccurateBacktester:
         symbol = signal.get("symbol", "UNKNOWN")
         
         try:
-            entry_time = datetime.fromisoformat(
+            entry_time = make_naive(datetime.fromisoformat(
                 signal.get("signal_timestamp", "").replace("Z", "+00:00")
-            )
+            ))
         except:
             entry_time = datetime.now() - timedelta(days=7)
         

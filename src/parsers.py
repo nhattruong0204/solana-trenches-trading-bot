@@ -118,6 +118,7 @@ class BuySignalParser(SignalParser[BuySignal]):
             token_symbol=symbol.upper(),
             token_address=address,
             timestamp=datetime.now(timezone.utc),
+            raw_text=text,
         )
     
     @staticmethod

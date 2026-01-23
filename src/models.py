@@ -174,12 +174,14 @@ class BuySignal:
         token_symbol: Token symbol (e.g., "TRUMP")
         token_address: Solana token mint address
         timestamp: When the signal was received
+        raw_text: Original message text for DB storage
     """
     
     message_id: int
     token_symbol: str
     token_address: str
     timestamp: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    raw_text: str = ""
     
     def __post_init__(self) -> None:
         """Validate signal data."""
