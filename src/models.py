@@ -28,7 +28,7 @@ class PositionStatus(str, Enum):
 class Position:
     """
     Represents a trading position in a token.
-    
+
     Attributes:
         token_address: Solana token mint address (base58)
         token_symbol: Human-readable token symbol (e.g., "TRUMP")
@@ -38,8 +38,15 @@ class Position:
         status: Current position status
         sold_percentage: Percentage of position already sold
         last_multiplier: Most recent price multiplier seen
+        peak_multiplier: Highest multiplier achieved since entry (for trailing stops)
+        entry_price_usd: Entry price in USD (for reference)
+        signal_score: Quality score of the signal that triggered this position (0-100)
+        stop_loss_triggered: Whether this position was closed by stop loss
+        stop_loss_type: Type of stop loss that triggered (if any)
+        dca_count: Number of DCA (dollar cost averaging) entries made
+        total_cost_sol: Total SOL invested including DCA entries
     """
-    
+
     token_address: str
     token_symbol: str
     buy_time: datetime
@@ -48,6 +55,13 @@ class Position:
     status: PositionStatus = PositionStatus.OPEN
     sold_percentage: float = 0.0
     last_multiplier: float = 1.0
+    peak_multiplier: float = 1.0
+    entry_price_usd: Optional[float] = None
+    signal_score: Optional[float] = None
+    stop_loss_triggered: bool = False
+    stop_loss_type: Optional[str] = None
+    dca_count: int = 0
+    total_cost_sol: Optional[float] = None
     
     def __post_init__(self) -> None:
         """Validate position data after initialization."""
@@ -94,7 +108,7 @@ class Position:
     def to_dict(self) -> dict[str, Any]:
         """
         Serialize position to dictionary.
-        
+
         Returns:
             Dictionary representation suitable for JSON serialization
         """
@@ -107,19 +121,26 @@ class Position:
             "status": self.status.value,
             "sold_percentage": self.sold_percentage,
             "last_multiplier": self.last_multiplier,
+            "peak_multiplier": self.peak_multiplier,
+            "entry_price_usd": self.entry_price_usd,
+            "signal_score": self.signal_score,
+            "stop_loss_triggered": self.stop_loss_triggered,
+            "stop_loss_type": self.stop_loss_type,
+            "dca_count": self.dca_count,
+            "total_cost_sol": self.total_cost_sol,
         }
     
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> Position:
         """
         Deserialize position from dictionary.
-        
+
         Args:
             data: Dictionary containing position data
-            
+
         Returns:
             Position instance
-            
+
         Raises:
             KeyError: If required fields are missing
             ValueError: If data is invalid
@@ -133,6 +154,13 @@ class Position:
             status=PositionStatus(data.get("status", "open")),
             sold_percentage=float(data.get("sold_percentage", 0.0)),
             last_multiplier=float(data.get("last_multiplier", 1.0)),
+            peak_multiplier=float(data.get("peak_multiplier", data.get("last_multiplier", 1.0))),
+            entry_price_usd=data.get("entry_price_usd"),
+            signal_score=data.get("signal_score"),
+            stop_loss_triggered=data.get("stop_loss_triggered", False),
+            stop_loss_type=data.get("stop_loss_type"),
+            dca_count=int(data.get("dca_count", 0)),
+            total_cost_sol=data.get("total_cost_sol"),
         )
     
     def mark_partial_sell(self, percentage: float, multiplier: float) -> None:
@@ -154,7 +182,7 @@ class Position:
     def mark_closed(self, multiplier: Optional[float] = None) -> None:
         """
         Mark position as fully closed.
-        
+
         Args:
             multiplier: Final price multiplier (optional)
         """
@@ -162,6 +190,49 @@ class Position:
         self.sold_percentage = 100.0
         if multiplier is not None:
             self.last_multiplier = multiplier
+
+    def update_multiplier(self, multiplier: float) -> None:
+        """
+        Update the current and peak multipliers.
+
+        Args:
+            multiplier: Current price multiplier
+        """
+        self.last_multiplier = multiplier
+        if multiplier > self.peak_multiplier:
+            self.peak_multiplier = multiplier
+
+    def mark_stop_loss(self, stop_type: str, multiplier: Optional[float] = None) -> None:
+        """
+        Mark position as closed due to stop loss.
+
+        Args:
+            stop_type: Type of stop loss that triggered
+            multiplier: Final price multiplier (optional)
+        """
+        self.stop_loss_triggered = True
+        self.stop_loss_type = stop_type
+        self.mark_closed(multiplier)
+
+    def add_dca(self, amount_sol: float) -> None:
+        """
+        Record a DCA (dollar cost averaging) entry.
+
+        Args:
+            amount_sol: Additional SOL invested
+        """
+        self.dca_count += 1
+        if self.total_cost_sol is None:
+            self.total_cost_sol = self.buy_amount_sol + amount_sol
+        else:
+            self.total_cost_sol += amount_sol
+
+    @property
+    def average_cost_sol(self) -> float:
+        """Get average cost including DCA entries."""
+        if self.total_cost_sol is not None:
+            return self.total_cost_sol
+        return self.buy_amount_sol
 
 
 @dataclass(frozen=True, slots=True)

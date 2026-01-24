@@ -267,6 +267,12 @@ class TelegramController:
             "/pause": self._cmd_pause,
             "/resume": self._cmd_resume,
             "/stats": self._cmd_stats,
+            # Risk management commands
+            "/risk": self._cmd_risk,
+            "/setstoploss": self._cmd_set_stop_loss,
+            "/togglestoploss": self._cmd_toggle_stop_loss,
+            "/circuitbreaker": self._cmd_circuit_breaker,
+            "/setcapital": self._cmd_set_capital,
         }
         
         handler = handlers.get(command)
@@ -300,6 +306,12 @@ class TelegramController:
             "• /setsell `<percent>` - Sell percentage\n"
             "• /setmultiplier `<X>` - Min sell multiplier\n"
             "• /setmax `<count>` - Max positions\n\n"
+            "*Risk Management:*\n"
+            "• /risk - Risk status & metrics\n"
+            "• /setstoploss `<percent>` - Set stop loss %\n"
+            "• /togglestoploss - Enable/disable stop loss\n"
+            "• /circuitbreaker - View/reset circuit breaker\n"
+            "• /setcapital `<SOL>` - Set trading capital\n\n"
             "_Example: /setsize 0.2_"
         )
         await self.notify(help_text)
@@ -549,5 +561,173 @@ class TelegramController:
         
         if "total_invested_sol" in stats:
             message += f"• Total Invested: `{stats['total_invested_sol']:.4f} SOL`\n"
-        
+
         await self.notify(message)
+
+    # === RISK MANAGEMENT COMMANDS ===
+
+    async def _cmd_risk(self, args: str) -> None:
+        """Show risk management status."""
+        if not self._bot:
+            await self.notify("❌ Bot not connected")
+            return
+
+        if not self._bot.risk_manager:
+            await self.notify("❌ Risk manager not initialized")
+            return
+
+        # Get formatted risk status
+        risk_status = self._bot.get_risk_status()
+        await self.notify(risk_status)
+
+    async def _cmd_set_stop_loss(self, args: str) -> None:
+        """Set stop loss percentage."""
+        if not self._bot or not self._bot.risk_manager:
+            await self.notify("❌ Risk manager not available")
+            return
+
+        current_pct = self._bot.risk_manager.config.stop_loss.fixed_percentage
+
+        if not args:
+            await self.notify(
+                "❌ Usage: `/setstoploss <percent>`\n\n"
+                f"Current: `{current_pct:.0%}`\n"
+                "Example: `/setstoploss 25` (for 25% stop loss)"
+            )
+            return
+
+        try:
+            # Parse percentage (accept both "25" and "0.25")
+            value = float(args.strip().rstrip("%"))
+            if value > 1:
+                value = value / 100  # Convert 25 to 0.25
+
+            if value < 0.05:
+                await self.notify("❌ Stop loss must be at least `5%`")
+                return
+            if value > 0.90:
+                await self.notify("❌ Stop loss cannot exceed `90%`")
+                return
+
+            old_pct = current_pct
+            self._bot.risk_manager.stop_loss.update_config(fixed_percentage=value)
+
+            await self.notify(
+                f"✅ *Stop loss updated*\n\n"
+                f"• Old: `{old_pct:.0%}`\n"
+                f"• New: `{value:.0%}`\n\n"
+                f"_Positions will exit when down {value:.0%} from entry_"
+            )
+        except ValueError:
+            await self.notify("❌ Invalid percentage. Use a number like `25`")
+
+    async def _cmd_toggle_stop_loss(self, args: str) -> None:
+        """Toggle stop loss on/off."""
+        if not self._bot or not self._bot.risk_manager:
+            await self.notify("❌ Risk manager not available")
+            return
+
+        current = self._bot.risk_manager.config.stop_loss.enabled
+        new_state = not current
+
+        self._bot.risk_manager.stop_loss.update_config(enabled=new_state)
+
+        emoji = "✅" if new_state else "❌"
+        state = "ENABLED" if new_state else "DISABLED"
+
+        message = (
+            f"{emoji} *Stop Loss {state}*\n\n"
+        )
+
+        if new_state:
+            sl_config = self._bot.risk_manager.config.stop_loss
+            message += (
+                f"• Type: `{sl_config.stop_loss_type.value}`\n"
+                f"• Fixed %: `{sl_config.fixed_percentage:.0%}`\n"
+                f"• Trailing: `{sl_config.trailing_percentage:.0%}` after `{sl_config.trailing_activation}X`"
+            )
+        else:
+            message += "⚠️ _Positions will NOT be automatically stopped out_"
+
+        await self.notify(message)
+
+    async def _cmd_circuit_breaker(self, args: str) -> None:
+        """Show circuit breaker status or reset it."""
+        if not self._bot or not self._bot.risk_manager:
+            await self.notify("❌ Risk manager not available")
+            return
+
+        cb = self._bot.risk_manager.circuit_breaker
+
+        # Check if user wants to reset
+        if args.strip().lower() == "reset":
+            cb.reset()
+            await self.notify(
+                "✅ *Circuit Breaker Reset*\n\n"
+                "Daily loss tracking and consecutive loss counter have been reset.\n"
+                "Trading is now allowed."
+            )
+            return
+
+        # Show status
+        metrics = cb.get_metrics()
+        can_trade, reason = cb.can_trade()
+
+        if can_trade:
+            status_emoji = "🟢"
+            status_text = "OK - Trading Allowed"
+        else:
+            status_emoji = "🔴"
+            status_text = f"TRIGGERED - {reason}"
+
+        message = (
+            f"⚡ *CIRCUIT BREAKER STATUS*\n\n"
+            f"• Status: {status_emoji} `{status_text}`\n"
+            f"• Daily PnL: `{metrics['daily_pnl']:+.4f} SOL`\n"
+            f"• Daily Limit: `{metrics['daily_limit']:.4f} SOL`\n"
+            f"• Consecutive Losses: `{metrics['consecutive_losses']}/{metrics['consecutive_limit']}`\n"
+        )
+
+        if metrics['cooldown_until']:
+            message += f"• Cooldown Until: `{metrics['cooldown_until']}`\n"
+
+        message += "\n_Use `/circuitbreaker reset` to manually reset_"
+
+        await self.notify(message)
+
+    async def _cmd_set_capital(self, args: str) -> None:
+        """Set trading capital for risk calculations."""
+        if not self._bot or not self._bot.risk_manager:
+            await self.notify("❌ Risk manager not available")
+            return
+
+        current = self._bot.risk_manager._capital
+
+        if not args:
+            await self.notify(
+                "❌ Usage: `/setcapital <SOL>`\n\n"
+                f"Current: `{current:.2f} SOL`\n"
+                "Example: `/setcapital 10`"
+            )
+            return
+
+        try:
+            value = float(args.strip())
+            if value < 0.1:
+                await self.notify("❌ Capital must be at least `0.1 SOL`")
+                return
+            if value > 10000:
+                await self.notify("❌ Capital cannot exceed `10000 SOL`")
+                return
+
+            old = current
+            self._bot.risk_manager.set_capital(value)
+
+            await self.notify(
+                f"✅ *Trading capital updated*\n\n"
+                f"• Old: `{old:.2f} SOL`\n"
+                f"• New: `{value:.2f} SOL`\n\n"
+                f"_Risk limits will be calculated based on new capital_"
+            )
+        except ValueError:
+            await self.notify("❌ Invalid amount. Use a number like `10`")
