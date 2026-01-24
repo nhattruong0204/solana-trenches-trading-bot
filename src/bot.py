@@ -36,6 +36,14 @@ from src.exceptions import (
 )
 from src.models import BuySignal, Position, PositionStatus, ProfitAlert
 from src.parsers import MessageParser
+from src.risk_manager import (
+    RiskManager,
+    RiskConfig,
+    StopLossConfig,
+    PositionSizingConfig,
+    CircuitBreakerConfig,
+    StopLossType,
+)
 from src.state import TradingState
 from src.trader import GMGNTrader
 
@@ -75,6 +83,7 @@ class TradingBot:
         self._channel_entity: Optional[Channel] = None
         self._state: Optional[TradingState] = None
         self._notification_bot: Optional["NotificationBot"] = None
+        self._risk_manager: Optional[RiskManager] = None
         self._parser = MessageParser()
         self._running = False
         self._shutdown_event = asyncio.Event()
@@ -97,6 +106,11 @@ class TradingBot:
     def state(self) -> Optional[TradingState]:
         """Get current trading state."""
         return self._state
+
+    @property
+    def risk_manager(self) -> Optional[RiskManager]:
+        """Get the risk manager."""
+        return self._risk_manager
     
     async def __aenter__(self) -> "TradingBot":
         """Async context manager entry."""
@@ -120,11 +134,14 @@ class TradingBot:
         
         # Initialize state manager
         self._state = TradingState(Path(self._settings.state_file))
-        
+
         try:
             self._state.load()
         except Exception as e:
             logger.warning(f"Could not load existing state: {e}")
+
+        # Initialize risk manager
+        self._init_risk_manager()
         
         # Initialize Telegram client
         await self._init_telegram()
@@ -247,6 +264,65 @@ class TradingBot:
         self._notification_bot.set_trading_bot(self)
         await self._notification_bot.start()
         logger.info("✅ Notification bot started")
+
+    def _init_risk_manager(self) -> None:
+        """Initialize the risk manager with settings from config."""
+        risk_settings = self._settings.risk
+
+        # Build stop loss config
+        stop_loss_config = StopLossConfig(
+            enabled=risk_settings.stop_loss_enabled,
+            stop_loss_type=StopLossType(risk_settings.stop_loss_type),
+            fixed_percentage=risk_settings.stop_loss_percentage,
+            trailing_percentage=risk_settings.trailing_stop_percentage,
+            trailing_activation=risk_settings.trailing_stop_activation,
+            time_limit_hours=risk_settings.time_stop_hours,
+        )
+
+        # Build position sizing config
+        sizing_config = PositionSizingConfig(
+            enabled=risk_settings.dynamic_sizing_enabled,
+            base_amount_sol=self._settings.trading_buy_amount_sol,
+            risk_per_trade=risk_settings.risk_per_trade,
+            min_position_size_sol=risk_settings.min_position_size_sol,
+            max_position_size_sol=risk_settings.max_position_size_sol,
+        )
+
+        # Build circuit breaker config
+        circuit_config = CircuitBreakerConfig(
+            enabled=risk_settings.circuit_breaker_enabled,
+            daily_loss_limit_pct=risk_settings.daily_loss_limit_pct,
+            consecutive_loss_limit=risk_settings.consecutive_loss_limit,
+            cooldown_minutes=risk_settings.circuit_breaker_cooldown_minutes,
+        )
+
+        # Create risk config
+        risk_config = RiskConfig(
+            stop_loss=stop_loss_config,
+            position_sizing=sizing_config,
+            circuit_breaker=circuit_config,
+            max_portfolio_heat=risk_settings.max_portfolio_heat,
+            max_hold_time_hours=risk_settings.max_hold_time_hours,
+        )
+
+        self._risk_manager = RiskManager(
+            config=risk_config,
+            capital=risk_settings.trading_capital_sol,
+        )
+
+        # Update with current open positions
+        if self._state:
+            open_positions = [
+                p for p in self._state.positions.values()
+                if p.is_open or p.is_partially_sold
+            ]
+            self._risk_manager.update_positions(open_positions)
+
+        logger.info(
+            f"✅ Risk manager initialized "
+            f"(stop_loss={risk_settings.stop_loss_enabled}, "
+            f"circuit_breaker={risk_settings.circuit_breaker_enabled})"
+        )
     
     async def _shutdown(self) -> None:
         """Gracefully shutdown the bot."""
@@ -386,7 +462,7 @@ class TradingBot:
     async def _handle_buy_signal(self, signal: BuySignal) -> None:
         """
         Handle a buy signal.
-        
+
         Args:
             signal: Parsed buy signal
         """
@@ -401,14 +477,14 @@ class TradingBot:
             max_positions = self._settings.trading_max_positions
             trading_paused = False
             wallet_configured = True  # Assume configured if no notification bot
-        
+
         trading = self._settings.trading
-        
+
         logger.info(
             f"📨 Buy signal: ${signal.token_symbol} "
             f"({signal.token_address[:12]}...)"
         )
-        
+
         # Notify about the signal and record for PnL tracking (LIVE MODE)
         if self._notification_bot:
             await self._notification_bot.notify_signal(
@@ -425,80 +501,128 @@ class TradingBot:
                 raw_text=signal.raw_text,
                 channel_id=self._channel_entity.id if self._channel_entity else None,
             )
-        
+
         # Check if wallet is configured
         if not wallet_configured:
             logger.info("Wallet not configured, skipping trade")
             return
-        
+
         # Check if trading is paused
         if trading_paused:
             logger.info("Trading paused, skipping")
             return
-        
+
         # Check if trading is enabled
         if not trading.enabled:
             logger.info("Trading disabled, skipping")
             return
-        
+
+        # === RISK MANAGEMENT CHECKS ===
+
+        # Check circuit breaker
+        if self._risk_manager:
+            can_trade, reason = self._risk_manager.circuit_breaker.can_trade()
+            if not can_trade:
+                logger.warning(f"🛑 Circuit breaker: {reason}")
+                if self._notification_bot:
+                    await self._notification_bot.send_admin_message(
+                        f"🛑 Trade blocked by circuit breaker: {reason}"
+                    )
+                return
+
         # Check for existing position
         if self._state and self._state.has_position(signal.token_address):
             existing = self._state.get_position(signal.token_address)
             if existing and existing.status != PositionStatus.CLOSED:
                 logger.info(f"Already have position in ${signal.token_symbol}, skipping")
                 return
-        
+
         # Check max positions
         if self._state and self._state.open_position_count >= max_positions:
             logger.warning(
                 f"Max positions ({max_positions}) reached, skipping"
             )
             return
-        
+
+        # Calculate dynamic position size
+        final_buy_amount = buy_amount
+        signal_score = None
+
+        if self._risk_manager:
+            # TODO: Get signal_score from signal scorer (Phase 2)
+            # For now, use default sizing
+            size_result = self._risk_manager.calculate_position_size(
+                signal_score=signal_score,
+                volatility=None,  # TODO: Add volatility calculation
+            )
+            final_buy_amount = size_result.size_sol
+            logger.info(f"📊 Position size: {final_buy_amount:.4f} SOL ({size_result.reasoning})")
+
+            # Check portfolio heat
+            can_open, reason = self._risk_manager.can_open_position(final_buy_amount)
+            if not can_open:
+                logger.warning(f"🔥 Portfolio risk limit: {reason}")
+                if self._notification_bot:
+                    await self._notification_bot.send_admin_message(
+                        f"🔥 Trade blocked by portfolio risk: {reason}"
+                    )
+                return
+
         # Execute buy
         if not self._trader:
             logger.error("Trader not initialized")
             return
-        
+
         result = await self._trader.buy_token(
             token_address=signal.token_address,
-            amount_sol=buy_amount,
+            amount_sol=final_buy_amount,
             symbol=signal.token_symbol,
         )
-        
+
         # Notify about trade execution
         if self._notification_bot:
             await self._notification_bot.notify_trade(
                 action="BUY",
                 token_symbol=signal.token_symbol,
-                amount_sol=buy_amount,
+                amount_sol=final_buy_amount,
                 success=result.success,
                 error=result.error if not result.success else None,
             )
-        
+
         if result.success and self._state:
-            # Record position
+            # Record position with additional risk management fields
             position = Position(
                 token_address=signal.token_address,
                 token_symbol=signal.token_symbol,
                 buy_time=datetime.now(timezone.utc),
-                buy_amount_sol=buy_amount,
+                buy_amount_sol=final_buy_amount,
                 signal_msg_id=signal.message_id,
+                signal_score=signal_score,
+                total_cost_sol=final_buy_amount,
             )
-            
+
             try:
                 await self._state.add_position(
                     position,
                     max_positions=max_positions,
                 )
                 logger.info(f"✅ Position opened: ${signal.token_symbol}")
+
+                # Update risk manager with new position
+                if self._risk_manager:
+                    open_positions = [
+                        p for p in self._state.positions.values()
+                        if p.is_open or p.is_partially_sold
+                    ]
+                    self._risk_manager.update_positions(open_positions)
+
             except (DuplicatePositionError, MaxPositionsReachedError) as e:
                 logger.warning(f"Could not add position: {e}")
     
     async def _handle_profit_alert(self, alert: ProfitAlert) -> None:
         """
         Handle a profit alert (potential sell signal).
-        
+
         Args:
             alert: Parsed profit alert
         """
@@ -511,14 +635,12 @@ class TradingBot:
             min_multiplier = self._settings.trading_min_multiplier
             sell_percentage = self._settings.trading_sell_percentage
             trading_paused = False
-        
-        trading = self._settings.trading
-        
+
         logger.info(
             f"📨 Profit alert: {alert.multiplier}X "
             f"(reply to msg {alert.reply_to_msg_id})"
         )
-        
+
         # Record profit alert to database (LIVE MODE)
         if self._notification_bot:
             await self._notification_bot.record_profit_alert(
@@ -529,27 +651,55 @@ class TradingBot:
                 raw_text=alert.raw_text if hasattr(alert, 'raw_text') else None,
                 channel_id=self._channel_entity.id if self._channel_entity else None,
             )
-        
+
         # Find position
         if not self._state:
             return
-        
+
         position = self._state.get_position_by_signal(alert.reply_to_msg_id)
-        
+
         if not position:
             logger.debug(f"No position found for signal {alert.reply_to_msg_id}")
             return
-        
-        # Update multiplier
-        position.last_multiplier = alert.multiplier
-        
-        # Determine if we should sell
-        will_sell = (
-            alert.multiplier >= min_multiplier and 
+
+        # Update multiplier and peak tracking
+        position.update_multiplier(alert.multiplier)
+
+        # === STOP LOSS EVALUATION ===
+        stop_loss_triggered = False
+        stop_loss_reason = None
+
+        if self._risk_manager and position.is_open:
+            # Evaluate stop loss
+            sl_result = self._risk_manager.evaluate_stop_loss(
+                position=position,
+                current_multiplier=alert.multiplier,
+                peak_multiplier=position.peak_multiplier,
+            )
+
+            if sl_result.should_exit:
+                stop_loss_triggered = True
+                stop_loss_reason = sl_result.reason
+                sell_percentage = 100  # Full exit on stop loss
+                logger.warning(f"🛑 Stop loss triggered: {sl_result.reason}")
+
+            # Also check force exit (max hold time)
+            force_exit, force_reason = self._risk_manager.should_force_exit(position)
+            if force_exit and not stop_loss_triggered:
+                stop_loss_triggered = True
+                stop_loss_reason = force_reason
+                sell_percentage = 100
+                logger.warning(f"⏰ Force exit: {force_reason}")
+
+        # Determine if we should sell (either stop loss or take profit)
+        should_take_profit = (
+            alert.multiplier >= min_multiplier and
             position.status not in (PositionStatus.PARTIAL_SOLD, PositionStatus.CLOSED) and
             not trading_paused
         )
-        
+
+        will_sell = stop_loss_triggered or should_take_profit
+
         # Notify about profit alert
         if self._notification_bot:
             await self._notification_bot.notify_profit_alert(
@@ -557,43 +707,50 @@ class TradingBot:
                 multiplier=alert.multiplier,
                 will_sell=will_sell,
             )
-        
+
+            if stop_loss_triggered:
+                await self._notification_bot.send_admin_message(
+                    f"🛑 **STOP LOSS** ${position.token_symbol}\n"
+                    f"Reason: {stop_loss_reason}\n"
+                    f"Multiplier: {alert.multiplier:.2f}X"
+                )
+
         # Check if we should sell
-        if alert.multiplier < min_multiplier:
+        if not stop_loss_triggered and alert.multiplier < min_multiplier:
             logger.debug(
                 f"Multiplier {alert.multiplier}X below threshold "
                 f"{min_multiplier}X"
             )
             return
-        
-        # Check if trading is paused
-        if trading_paused:
+
+        # Check if trading is paused (stop loss overrides pause)
+        if trading_paused and not stop_loss_triggered:
             logger.info("Trading paused, skipping sell")
             return
-        
+
         # Check if already sold at this level
-        if position.status == PositionStatus.PARTIAL_SOLD:
+        if position.status == PositionStatus.PARTIAL_SOLD and not stop_loss_triggered:
             logger.info(
                 f"Already sold {position.sold_percentage}% of "
                 f"${position.token_symbol}, skipping"
             )
             return
-        
+
         if position.status == PositionStatus.CLOSED:
             logger.info(f"Position ${position.token_symbol} already closed")
             return
-        
+
         # Execute sell
         if not self._trader:
             logger.error("Trader not initialized")
             return
-        
+
         result = await self._trader.sell_token(
             token_address=position.token_address,
             percentage=sell_percentage,
             symbol=position.token_symbol,
         )
-        
+
         # Notify about trade execution
         if self._notification_bot:
             await self._notification_bot.notify_trade(
@@ -604,27 +761,58 @@ class TradingBot:
                 multiplier=alert.multiplier,
                 error=result.error if not result.success else None,
             )
-        
+
         if result.success:
-            await self._state.mark_partial_sell(
-                token_address=position.token_address,
-                percentage=float(sell_percentage),
-                multiplier=alert.multiplier,
-            )
-            logger.info(
-                f"✅ Sold {sell_percentage}% of "
-                f"${position.token_symbol} at {alert.multiplier}X"
-            )
+            # Calculate PnL for circuit breaker tracking
+            pnl = position.buy_amount_sol * (alert.multiplier - 1.0) * (sell_percentage / 100)
+
+            if stop_loss_triggered:
+                # Mark as stop loss exit
+                position.mark_stop_loss(
+                    stop_type=stop_loss_reason or "unknown",
+                    multiplier=alert.multiplier,
+                )
+                logger.info(
+                    f"🛑 Stop loss exit: ${position.token_symbol} at {alert.multiplier}X "
+                    f"(PnL: {pnl:+.4f} SOL)"
+                )
+            else:
+                await self._state.mark_partial_sell(
+                    token_address=position.token_address,
+                    percentage=float(sell_percentage),
+                    multiplier=alert.multiplier,
+                )
+                logger.info(
+                    f"✅ Sold {sell_percentage}% of "
+                    f"${position.token_symbol} at {alert.multiplier}X"
+                )
+
+            # Record trade result in circuit breaker
+            if self._risk_manager:
+                triggered = self._risk_manager.record_trade_result(pnl)
+                if triggered:
+                    logger.warning("🛑 Circuit breaker triggered after trade!")
+                    if self._notification_bot:
+                        await self._notification_bot.send_admin_message(
+                            "🛑 Circuit breaker activated! Trading halted."
+                        )
+
+                # Update positions tracking
+                open_positions = [
+                    p for p in self._state.positions.values()
+                    if p.is_open or p.is_partially_sold
+                ]
+                self._risk_manager.update_positions(open_positions)
     
     def get_status(self) -> dict[str, Any]:
         """
         Get current bot status.
-        
+
         Returns:
             Dictionary with status information
         """
         trading = self._settings.trading
-        
+
         status = {
             "running": self._running,
             "uptime_seconds": self.uptime,
@@ -632,14 +820,38 @@ class TradingBot:
             "dry_run": trading.dry_run,
             "trading_enabled": trading.enabled,
         }
-        
+
         if self._state:
             status["positions"] = self._state.get_statistics()
-        
+
         if self._trader:
             status["trades_executed"] = self._trader.trade_count
-        
+
+        # Add risk management metrics
+        if self._risk_manager:
+            metrics = self._risk_manager.get_portfolio_metrics()
+            status["risk"] = {
+                "portfolio_heat": f"{metrics.portfolio_heat:.1%}",
+                "daily_pnl": f"{metrics.daily_realized_pnl:+.4f} SOL",
+                "consecutive_losses": metrics.consecutive_losses,
+                "circuit_breaker_active": metrics.circuit_breaker_active,
+                "stop_loss_enabled": self._risk_manager.config.stop_loss.enabled,
+            }
+            if metrics.circuit_breaker_active:
+                status["risk"]["circuit_breaker_reason"] = metrics.circuit_breaker_reason
+
         return status
+
+    def get_risk_status(self) -> str:
+        """
+        Get formatted risk management status.
+
+        Returns:
+            Human-readable risk status string
+        """
+        if self._risk_manager:
+            return self._risk_manager.format_status()
+        return "Risk manager not initialized"
 
 
 @asynccontextmanager

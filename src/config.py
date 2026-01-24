@@ -55,7 +55,7 @@ class TelegramSettings(BaseModel):
 
 class TradingSettings(BaseModel):
     """Trading strategy configuration."""
-    
+
     enabled: bool = Field(True, description="Master switch for trading")
     dry_run: bool = Field(True, description="If True, simulate trades without execution")
     buy_amount_sol: float = Field(
@@ -82,13 +82,102 @@ class TradingSettings(BaseModel):
         le=100,
         description="Maximum number of concurrent positions"
     )
-    
+
     @field_validator("buy_amount_sol")
     @classmethod
     def validate_buy_amount(cls, v: float) -> float:
         if v < 0.001:
             raise ValueError("Buy amount must be at least 0.001 SOL")
         return round(v, 4)
+
+
+class RiskSettings(BaseModel):
+    """Risk management configuration."""
+
+    # Stop Loss
+    stop_loss_enabled: bool = Field(True, description="Enable stop loss protection")
+    stop_loss_type: str = Field(
+        "fixed_percentage",
+        description="Stop loss type: fixed_percentage, trailing, time_based, atr_based"
+    )
+    stop_loss_percentage: float = Field(
+        0.25,
+        ge=0.05,
+        le=0.90,
+        description="Fixed stop loss percentage (e.g., 0.25 = 25% loss)"
+    )
+    trailing_stop_percentage: float = Field(
+        0.20,
+        ge=0.05,
+        le=0.50,
+        description="Trailing stop percentage from peak"
+    )
+    trailing_stop_activation: float = Field(
+        1.5,
+        ge=1.1,
+        le=10.0,
+        description="Multiplier to activate trailing stop"
+    )
+    time_stop_hours: int = Field(
+        24,
+        ge=1,
+        le=168,
+        description="Hours before time-based stop triggers if underwater"
+    )
+
+    # Position Sizing
+    dynamic_sizing_enabled: bool = Field(True, description="Enable dynamic position sizing")
+    risk_per_trade: float = Field(
+        0.02,
+        ge=0.005,
+        le=0.10,
+        description="Risk per trade as fraction of capital (e.g., 0.02 = 2%)"
+    )
+    min_position_size_sol: float = Field(0.01, ge=0.001, description="Minimum position size")
+    max_position_size_sol: float = Field(1.0, le=10.0, description="Maximum position size")
+
+    # Portfolio Risk
+    max_portfolio_heat: float = Field(
+        0.10,
+        ge=0.05,
+        le=0.50,
+        description="Maximum portfolio risk as fraction of capital"
+    )
+    max_hold_time_hours: int = Field(
+        72,
+        ge=1,
+        le=720,
+        description="Maximum hours to hold a position"
+    )
+
+    # Circuit Breaker
+    circuit_breaker_enabled: bool = Field(True, description="Enable circuit breaker")
+    daily_loss_limit_pct: float = Field(
+        0.05,
+        ge=0.01,
+        le=0.25,
+        description="Daily loss limit as fraction of capital"
+    )
+    consecutive_loss_limit: int = Field(
+        5,
+        ge=2,
+        le=20,
+        description="Number of consecutive losses to trigger circuit breaker"
+    )
+    circuit_breaker_cooldown_minutes: int = Field(
+        60,
+        ge=5,
+        le=1440,
+        description="Cooldown period after circuit breaker triggers"
+    )
+
+    # Capital tracking
+    trading_capital_sol: float = Field(
+        10.0,
+        ge=0.1,
+        le=10000.0,
+        description="Total trading capital in SOL for risk calculations"
+    )
 
 
 class ChannelSettings(BaseModel):
@@ -192,6 +281,25 @@ class Settings(BaseSettings):
     # Path configuration
     state_file: str = Field(DEFAULT_STATE_FILE, alias="STATE_FILE")
     log_file: str = Field(DEFAULT_LOG_FILE, alias="LOG_FILE")
+
+    # Risk management configuration
+    risk_stop_loss_enabled: bool = Field(True, alias="STOP_LOSS_ENABLED")
+    risk_stop_loss_type: str = Field("fixed_percentage", alias="STOP_LOSS_TYPE")
+    risk_stop_loss_percentage: float = Field(0.25, alias="STOP_LOSS_PERCENTAGE")
+    risk_trailing_stop_percentage: float = Field(0.20, alias="TRAILING_STOP_PERCENTAGE")
+    risk_trailing_stop_activation: float = Field(1.5, alias="TRAILING_STOP_ACTIVATION")
+    risk_time_stop_hours: int = Field(24, alias="TIME_STOP_HOURS")
+    risk_dynamic_sizing_enabled: bool = Field(True, alias="DYNAMIC_SIZING_ENABLED")
+    risk_per_trade: float = Field(0.02, alias="RISK_PER_TRADE")
+    risk_min_position_size_sol: float = Field(0.01, alias="MIN_POSITION_SIZE_SOL")
+    risk_max_position_size_sol: float = Field(1.0, alias="MAX_POSITION_SIZE_SOL")
+    risk_max_portfolio_heat: float = Field(0.10, alias="MAX_PORTFOLIO_HEAT")
+    risk_max_hold_time_hours: int = Field(72, alias="MAX_HOLD_TIME_HOURS")
+    risk_circuit_breaker_enabled: bool = Field(True, alias="CIRCUIT_BREAKER_ENABLED")
+    risk_daily_loss_limit_pct: float = Field(0.05, alias="DAILY_LOSS_LIMIT_PCT")
+    risk_consecutive_loss_limit: int = Field(5, alias="CONSECUTIVE_LOSS_LIMIT")
+    risk_circuit_breaker_cooldown_minutes: int = Field(60, alias="CIRCUIT_BREAKER_COOLDOWN_MINUTES")
+    risk_trading_capital_sol: float = Field(10.0, alias="TRADING_CAPITAL_SOL")
     
     @property
     def telegram(self) -> TelegramSettings:
@@ -229,6 +337,29 @@ class Settings(BaseSettings):
         return PathSettings(
             state_file=Path(self.state_file),
             log_file=Path(self.log_file),
+        )
+
+    @property
+    def risk(self) -> RiskSettings:
+        """Get risk management settings as a structured object."""
+        return RiskSettings(
+            stop_loss_enabled=self.risk_stop_loss_enabled,
+            stop_loss_type=self.risk_stop_loss_type,
+            stop_loss_percentage=self.risk_stop_loss_percentage,
+            trailing_stop_percentage=self.risk_trailing_stop_percentage,
+            trailing_stop_activation=self.risk_trailing_stop_activation,
+            time_stop_hours=self.risk_time_stop_hours,
+            dynamic_sizing_enabled=self.risk_dynamic_sizing_enabled,
+            risk_per_trade=self.risk_per_trade,
+            min_position_size_sol=self.risk_min_position_size_sol,
+            max_position_size_sol=self.risk_max_position_size_sol,
+            max_portfolio_heat=self.risk_max_portfolio_heat,
+            max_hold_time_hours=self.risk_max_hold_time_hours,
+            circuit_breaker_enabled=self.risk_circuit_breaker_enabled,
+            daily_loss_limit_pct=self.risk_daily_loss_limit_pct,
+            consecutive_loss_limit=self.risk_consecutive_loss_limit,
+            circuit_breaker_cooldown_minutes=self.risk_circuit_breaker_cooldown_minutes,
+            trading_capital_sol=self.risk_trading_capital_sol,
         )
 
 

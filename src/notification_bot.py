@@ -25,6 +25,8 @@ from telethon.tl.custom import Button
 
 from src.signal_history import SignalHistory
 from src.signal_database import SignalDatabase
+from src.strategies import StrategyManager, TakeProfitStrategy, StrategyType
+from src.constants import TRENCHES_CHANNEL_USERNAME
 
 if TYPE_CHECKING:
     from src.bot import TradingBot
@@ -39,6 +41,19 @@ SOLANA_ADDRESS_PATTERN = re.compile(r'^[1-9A-HJ-NP-Za-km-z]{32,44}$')
 def is_valid_solana_address(address: str) -> bool:
     """Check if string is a valid Solana address."""
     return bool(SOLANA_ADDRESS_PATTERN.match(address))
+
+
+def get_signal_message_link(telegram_msg_id: int) -> str:
+    """
+    Generate a Telegram message link to the original signal in the channel.
+    
+    Args:
+        telegram_msg_id: The Telegram message ID from the signal channel
+        
+    Returns:
+        URL link to the message in the channel (e.g., https://t.me/fttrenches_volsm/12345)
+    """
+    return f"https://t.me/{TRENCHES_CHANNEL_USERNAME}/{telegram_msg_id}"
 
 
 class NotificationBot:
@@ -126,6 +141,54 @@ class NotificationBot:
         db_dsn = self._build_database_dsn()
         if db_dsn:
             self._signal_db = SignalDatabase(db_dsn)
+        
+        # Strategy manager for take profit strategies
+        self._strategy_manager = StrategyManager()
+        self._load_strategy_state()
+    
+    def _load_strategy_state(self) -> None:
+        """Load strategy enabled state from state file."""
+        import json
+        state_file = self._settings.state_file.replace('.json', '_strategies.json') if isinstance(self._settings.state_file, str) else str(self._settings.state_file).replace('.json', '_strategies.json')
+        try:
+            with open(state_file, 'r') as f:
+                data = json.load(f)
+                for strategy_id, enabled in data.get('enabled_strategies', {}).items():
+                    if enabled:
+                        self._strategy_manager.enable_strategy(strategy_id)
+                    else:
+                        self._strategy_manager.disable_strategy(strategy_id)
+            logger.info(f"Loaded strategy state from {state_file}")
+        except FileNotFoundError:
+            logger.debug("No strategy state file found, using defaults")
+        except Exception as e:
+            logger.warning(f"Failed to load strategy state: {e}")
+    
+    def _save_strategy_state(self) -> None:
+        """Save strategy enabled state to state file."""
+        import json
+        state_file = self._settings.state_file.replace('.json', '_strategies.json') if isinstance(self._settings.state_file, str) else str(self._settings.state_file).replace('.json', '_strategies.json')
+        try:
+            data = {
+                'enabled_strategies': {
+                    s.id: s.enabled for s in self._strategy_manager.strategies
+                }
+            }
+            with open(state_file, 'w') as f:
+                json.dump(data, f, indent=2)
+            logger.debug(f"Saved strategy state to {state_file}")
+        except Exception as e:
+            logger.warning(f"Failed to save strategy state: {e}")
+    
+    @property
+    def strategy_manager(self) -> StrategyManager:
+        """Get the strategy manager."""
+        return self._strategy_manager
+    
+    @property
+    def active_strategy(self) -> Optional[TakeProfitStrategy]:
+        """Get the currently active strategy."""
+        return self._strategy_manager.active_strategy
     
     def _build_database_dsn(self) -> Optional[str]:
         """Build PostgreSQL DSN from environment variables."""
@@ -561,6 +624,7 @@ class NotificationBot:
             "/bootstrap": self._cmd_bootstrap_signals,
             "/simulate": self._cmd_simulate,
             "/settings": self._cmd_settings,
+            "/strategies": self._cmd_strategies,
             "/setsize": self._cmd_set_size,
             "/setsell": self._cmd_set_sell,
             "/setmultiplier": self._cmd_set_multiplier,
@@ -608,6 +672,10 @@ class NotificationBot:
                 Button.inline("⚙️ Settings", b"cmd_settings"),
             ],
             [
+                Button.inline("🎯 Strategies", b"cmd_strategies"),
+                Button.inline("📊 Stats", b"cmd_stats"),
+            ],
+            [
                 Button.inline("📉 Signal PnL (All)", b"signalpnl_all"),
                 Button.inline("📉 Signal PnL (Custom)", b"signalpnl_custom"),
             ],
@@ -632,7 +700,6 @@ class NotificationBot:
                 Button.inline("▶️ Resume", b"cmd_resume"),
             ],
             [
-                Button.inline("📊 Stats", b"cmd_stats"),
                 Button.inline("❓ Help", b"cmd_help"),
             ],
         ]
@@ -683,6 +750,12 @@ class NotificationBot:
         # Acknowledge the callback
         await event.answer()
         
+        # Handle strategy toggle callbacks
+        if data.startswith("toggle_strategy_"):
+            strategy_id = data.replace("toggle_strategy_", "")
+            await self._toggle_strategy(strategy_id)
+            return
+        
         # Map callback data to handlers
         callback_handlers = {
             "cmd_status": lambda: self._cmd_status(""),
@@ -695,6 +768,7 @@ class NotificationBot:
             "cmd_resume": lambda: self._cmd_resume(""),
             "cmd_sync_signals": lambda: self._cmd_sync_signals(""),
             "cmd_bootstrap": lambda: self._cmd_bootstrap_signals(""),
+            "cmd_strategies": lambda: self._cmd_strategies(""),
             "signalpnl_all": lambda: self._cmd_signal_pnl("all"),
             "signalpnl_custom": lambda: self._prompt_custom_days(),
             "realpnl_all": lambda: self._cmd_real_pnl("all"),
@@ -737,6 +811,8 @@ class NotificationBot:
             "*Control:*\n"
             "• /pause - Pause trading\n"
             "• /resume - Resume trading\n\n"
+            "*Strategies:*\n"
+            "• /strategies - View and toggle take profit strategies\n\n"
             "*Configuration:*\n"
             "• /setsize `<SOL>` - Buy amount\n"
             "• /setsell `<percent>` - Sell percentage\n"
@@ -809,6 +885,10 @@ class NotificationBot:
         """Show settings."""
         wallet = f"`{self._gmgn_wallet[:8]}...{self._gmgn_wallet[-6:]}`" if self._gmgn_wallet else "❌ Not set"
         
+        # Get active strategy
+        active = self._strategy_manager.active_strategy
+        strategy_str = f"`{active.short_name}`" if active else "❌ None"
+        
         message = (
             "⚙️ *TRADING SETTINGS*\n\n"
             f"• Wallet: {wallet}\n"
@@ -816,11 +896,80 @@ class NotificationBot:
             f"• Sell %: `{self._sell_percentage}%`\n"
             f"• Min Multiplier: `{self._min_multiplier}X`\n"
             f"• Max Positions: `{self._max_positions}`\n"
+            f"• Strategy: {strategy_str}\n"
             f"• Dry Run: `{'Yes' if self._settings.trading_dry_run else 'No'}`\n"
             f"• Paused: `{'Yes' if self._trading_paused else 'No'}`"
         )
         
         await self._send_to_admin(message)
+    
+    async def _cmd_strategies(self, args: str) -> None:
+        """Show strategies menu with toggle buttons."""
+        strategies = self._strategy_manager.strategies
+        enabled_count = len([s for s in strategies if s.enabled])
+        active = self._strategy_manager.active_strategy
+        
+        # Build header message
+        active_str = f"{active.rank_emoji} `{active.name}`" if active else "None"
+        message = (
+            "🎯 *TAKE PROFIT STRATEGIES*\n\n"
+            f"*Active Strategy:* {active_str}\n"
+            f"*Enabled:* `{enabled_count}` of `{len(strategies)}`\n\n"
+            "_Tap a strategy to toggle on/off._\n"
+            "_The highest-ranked enabled strategy will be used._\n\n"
+            "━━━━━━━━━━━━━━━━━━━━━━\n"
+        )
+        
+        # Build strategy list
+        for s in strategies:
+            status = "✅" if s.enabled else "⬜"
+            pnl_emoji = "🟢" if s.net_pnl_sol >= 0 else "🔴"
+            
+            message += (
+                f"\n{s.rank_emoji} *{s.name}*\n"
+                f"   {status} Win: `{s.win_rate:.1f}%` | "
+                f"{pnl_emoji} PnL: `{s.net_pnl_sol:+.4f}` SOL\n"
+                f"   ROI: `{s.roi_pct:+.1f}%` | "
+                f"Mult: `{s.avg_mult:.2f}X` | "
+                f"Hold: `{s.avg_hold_hours:.1f}h`\n"
+            )
+        
+        # Build toggle buttons (3 per row)
+        buttons = []
+        row = []
+        for s in strategies:
+            status = "✅" if s.enabled else "⬜"
+            btn_text = f"{status} {s.short_name}"
+            callback_data = f"toggle_strategy_{s.id}".encode()
+            row.append(Button.inline(btn_text, callback_data))
+            
+            if len(row) >= 2:
+                buttons.append(row)
+                row = []
+        
+        if row:  # Add remaining buttons
+            buttons.append(row)
+        
+        # Add back button
+        buttons.append([Button.inline("⬅️ Back to Menu", b"back_to_menu")])
+        
+        await self._send_to_admin_with_buttons(message, buttons)
+    
+    async def _toggle_strategy(self, strategy_id: str) -> None:
+        """Toggle a strategy's enabled state and refresh the menu."""
+        strategy = self._strategy_manager.get_strategy(strategy_id)
+        if not strategy:
+            await self._send_to_admin(f"❌ Strategy not found: {strategy_id}")
+            return
+        
+        # Toggle
+        new_state = self._strategy_manager.toggle_strategy(strategy_id)
+        
+        # Save state
+        self._save_strategy_state()
+        
+        # Refresh strategies menu
+        await self._cmd_strategies("")
     
     async def _cmd_set_size(self, args: str) -> None:
         """Set buy amount."""
@@ -1258,10 +1407,12 @@ class NotificationBot:
             sol_profit = tr['sol_profit']
             mult = tr['multiplier']
             token_address = s.signal.token_address
+            telegram_msg_id = s.signal.telegram_msg_id
             
             # Build links
             dex_link = f"https://dexscreener.com/solana/{token_address}"
             gmgn_link = f"https://gmgn.ai/sol/token/{token_address}"
+            signal_link = get_signal_message_link(telegram_msg_id)
             
             if mult == 0:
                 emoji = "💀"
@@ -1280,7 +1431,8 @@ class NotificationBot:
                 mult_str = f"[{mult:.2f}X]({dex_link})"
             
             profit_emoji = "🟢" if sol_profit >= 0 else "🔴"
-            line = f"{i}. `${s.signal.token_symbol}` {emoji} {mult_str} | [G]({gmgn_link}) → {profit_emoji}`{sol_profit:+.3f}` SOL\n"
+            # Token symbol links to original signal message in the channel
+            line = f"{i}. [${s.signal.token_symbol}]({signal_link}) {emoji} {mult_str} | [G]({gmgn_link}) → {profit_emoji}`{sol_profit:+.3f}` SOL\n"
             token_lines.append(line)
         
         # Send token list in chunks
@@ -1506,10 +1658,12 @@ class NotificationBot:
             sol_profit = tr['sol_profit']
             mult = r.multiplier or 0
             token_address = r.signal.token_address
+            telegram_msg_id = r.signal.telegram_msg_id
             
             # Build links
             dex_link = f"https://dexscreener.com/solana/{token_address}"
             gmgn_link = f"https://gmgn.ai/sol/token/{token_address}"
+            signal_link = get_signal_message_link(telegram_msg_id)
             
             if r.is_rugged:
                 emoji = "💀"
@@ -1522,7 +1676,8 @@ class NotificationBot:
                 mult_str = f"[{mult:.2f}X]({dex_link})"
             
             profit_emoji = "🟢" if sol_profit >= 0 else "🔴"
-            line = f"{i}. `${r.signal.token_symbol}` {emoji} {mult_str} | [G]({gmgn_link}) → {profit_emoji}`{sol_profit:+.3f}` SOL\n"
+            # Token symbol links to original signal message in the channel
+            line = f"{i}. [${r.signal.token_symbol}]({signal_link}) {emoji} {mult_str} | [G]({gmgn_link}) → {profit_emoji}`{sol_profit:+.3f}` SOL\n"
             token_lines.append(line)
         
         # Send token list in chunks
@@ -1659,49 +1814,49 @@ class NotificationBot:
         
         await self._send_to_admin(header)
         
-        # Build comparison table - sorted from best to worst
-        # Split into chunks to avoid message length limits
-        table_header = (
-            "```\n"
-            "# | Ticker    | Signal | Real\n"
-            "--|-----------|--------|------\n"
-        )
-        
+        # Build comparison list with clickable token names
+        # Each token links to the original signal message in the channel
+        MAX_MESSAGE_LENGTH = 3800
         results = stats.results
-        chunk_size = 25
         
-        for chunk_idx in range(0, len(results), chunk_size):
-            chunk = results[chunk_idx:chunk_idx + chunk_size]
+        token_lines = []
+        for i, r in enumerate(results, 1):
+            ticker = r.signal.token_symbol
+            token_address = r.signal.token_address
+            telegram_msg_id = r.signal.telegram_msg_id
             
-            table = table_header
-            for i, r in enumerate(chunk, chunk_idx + 1):
-                ticker = r.signal.token_symbol[:8]
-                
-                # Signal multiplier
-                if r.has_profit_alert and r.signal_multiplier:
-                    sig_str = f"{r.signal_emoji}{r.signal_multiplier:.1f}X"
-                else:
-                    sig_str = f"{r.signal_emoji} ---"
-                
-                # Real multiplier
-                if r.real_multiplier is not None:
-                    real_str = f"{r.real_emoji}{r.real_multiplier:.1f}X"
-                elif r.is_rugged:
-                    real_str = "💀 RUG"
-                else:
-                    real_str = "❓ ---"
-                
-                table += f"{i:2} | ${ticker:<8} | {sig_str:<6} | {real_str}\n"
+            # Build links
+            signal_link = get_signal_message_link(telegram_msg_id)
+            dex_link = f"https://dexscreener.com/solana/{token_address}"
             
-            table += "```"
+            # Signal multiplier
+            if r.has_profit_alert and r.signal_multiplier:
+                sig_str = f"{r.signal_emoji}`{r.signal_multiplier:.1f}X`"
+            else:
+                sig_str = f"{r.signal_emoji}---"
             
-            # Add page indicator if multiple chunks
-            if len(results) > chunk_size:
-                page_num = chunk_idx // chunk_size + 1
-                total_pages = (len(results) + chunk_size - 1) // chunk_size
-                table += f"\n_Page {page_num}/{total_pages}_"
+            # Real multiplier
+            if r.real_multiplier is not None:
+                real_str = f"{r.real_emoji}[{r.real_multiplier:.1f}X]({dex_link})"
+            elif r.is_rugged:
+                real_str = f"💀[RUG]({dex_link})"
+            else:
+                real_str = f"❓[N/A]({dex_link})"
             
-            await self._send_to_admin(table)
+            # Token symbol links to original signal message in the channel
+            line = f"{i}. [${ticker}]({signal_link}) | Sig: {sig_str} | Now: {real_str}\n"
+            token_lines.append(line)
+        
+        # Send token list in chunks
+        current_message = "📋 *Comparison (Best → Worst)*\n_Click token to view signal_\n\n"
+        for line in token_lines:
+            if len(current_message) + len(line) > MAX_MESSAGE_LENGTH:
+                await self._send_to_admin(current_message)
+                current_message = ""
+            current_message += line
+        
+        if current_message:
+            await self._send_to_admin(current_message)
         
         # Save results to JSON file for AI analysis
         await self._save_compare_results_json(stats, days)
