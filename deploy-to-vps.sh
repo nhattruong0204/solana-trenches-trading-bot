@@ -12,9 +12,11 @@ YELLOW='\033[1;33m'
 NC='\033[0m' # No Color
 
 # Configuration
-VPS_IP=""
+VPS_IP="38.54.15.53"
 VPS_USER="root"
 REMOTE_DIR="/opt/solana-trading-bot"
+SSH_KEY="$HOME/.ssh/lightnode_vps"
+SSH_OPTS="-i $SSH_KEY"
 
 # Functions
 print_step() {
@@ -54,7 +56,7 @@ main() {
     print_step "Checking required files..."
     check_file ".env"
     check_file "wallet_tracker_session.session"
-    check_file "docker-compose.yml"
+    check_file "docker compose.yml"
     check_file "Dockerfile"
 
     # Create deployment package
@@ -70,18 +72,18 @@ main() {
         .
 
     print_step "Transferring files to VPS..."
-    
+
     # Create remote directory
-    ssh ${VPS_USER}@${VPS_IP} "mkdir -p ${REMOTE_DIR}/data"
-    
+    ssh ${SSH_OPTS} ${VPS_USER}@${VPS_IP} "mkdir -p ${REMOTE_DIR}/data"
+
     # Transfer files
-    scp /tmp/trading-bot-deploy.tar.gz ${VPS_USER}@${VPS_IP}:${REMOTE_DIR}/
-    scp .env ${VPS_USER}@${VPS_IP}:${REMOTE_DIR}/
-    scp wallet_tracker_session.session ${VPS_USER}@${VPS_IP}:${REMOTE_DIR}/
+    scp ${SSH_OPTS} /tmp/trading-bot-deploy.tar.gz ${VPS_USER}@${VPS_IP}:${REMOTE_DIR}/
+    scp ${SSH_OPTS} .env ${VPS_USER}@${VPS_IP}:${REMOTE_DIR}/
+    scp ${SSH_OPTS} wallet_tracker_session.session ${VPS_USER}@${VPS_IP}:${REMOTE_DIR}/
 
     # Setup on VPS
     print_step "Setting up on VPS..."
-    ssh ${VPS_USER}@${VPS_IP} << 'ENDSSH'
+    ssh ${SSH_OPTS} ${VPS_USER}@${VPS_IP} << 'ENDSSH'
 cd /opt/solana-trading-bot
 
 # Extract files
@@ -97,10 +99,10 @@ chmod 755 data
 
 # Build and start
 echo "Building Docker image..."
-docker-compose build
+docker compose build
 
 echo "Starting bot..."
-docker-compose up -d
+docker compose up -d
 
 echo "Waiting for container to start..."
 sleep 5
@@ -108,11 +110,11 @@ sleep 5
 # Show status
 echo ""
 echo "Container Status:"
-docker-compose ps
+docker compose ps
 
 echo ""
 echo "Recent Logs:"
-docker-compose logs --tail=20
+docker compose logs --tail=20
 ENDSSH
 
     # Cleanup
@@ -121,8 +123,8 @@ ENDSSH
     echo ""
     print_step "Deployment complete!"
     echo ""
-    echo "To view logs: ssh ${VPS_USER}@${VPS_IP} 'cd ${REMOTE_DIR} && docker-compose logs -f'"
-    echo "To check status: ssh ${VPS_USER}@${VPS_IP} 'cd ${REMOTE_DIR} && docker-compose ps'"
+    echo "To view logs: ssh ${VPS_USER}@${VPS_IP} 'cd ${REMOTE_DIR} && docker compose logs -f'"
+    echo "To check status: ssh ${VPS_USER}@${VPS_IP} 'cd ${REMOTE_DIR} && docker compose ps'"
     echo ""
 }
 

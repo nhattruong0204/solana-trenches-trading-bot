@@ -91,6 +91,74 @@ class TradingSettings(BaseModel):
         return round(v, 4)
 
 
+class PublicChannelSettings(BaseModel):
+    """Public marketing channel configuration."""
+
+    # Public channel for marketing (free, delayed signals)
+    public_channel_id: Optional[str] = Field(
+        None, description="Public Telegram channel ID for marketing broadcasts"
+    )
+    public_channel_username: Optional[str] = Field(
+        None, description="Public channel @username"
+    )
+
+    # Premium channel (instant signals, full details)
+    premium_channel_id: Optional[str] = Field(
+        None, description="Premium Telegram channel ID"
+    )
+
+    # Broadcast settings
+    min_multiplier_to_broadcast: float = Field(
+        2.0, ge=1.5, le=10.0,
+        description="Minimum multiplier to broadcast to public channel"
+    )
+    broadcast_delay_seconds: int = Field(
+        300, ge=60, le=3600,
+        description="Delay before broadcasting to public channel (free users)"
+    )
+    show_token_address_public: bool = Field(
+        False, description="Show token address in public channel (usually False)"
+    )
+    include_cta: bool = Field(
+        True, description="Include call-to-action for premium in broadcasts"
+    )
+
+    # Branding
+    bot_name: str = Field("Trenches Trading Bot", description="Bot name for branding")
+    bot_username: str = Field("TrenchesBot", description="Bot @username for CTAs")
+
+
+class SubscriptionSettings(BaseModel):
+    """Subscription and payment configuration."""
+
+    # Enable subscriptions
+    subscriptions_enabled: bool = Field(
+        False, description="Enable premium subscription system"
+    )
+
+    # Payment wallets
+    payment_sol_address: Optional[str] = Field(
+        None, description="SOL wallet address for payments"
+    )
+    payment_usdt_bep20_address: Optional[str] = Field(
+        None, description="USDT BEP20 (BNB Chain) address"
+    )
+    payment_usdc_sol_address: Optional[str] = Field(
+        None, description="USDC (Solana) address"
+    )
+
+    # Pricing (USD)
+    price_monthly: float = Field(79.0, ge=1.0, description="Monthly plan price USD")
+    price_quarterly: float = Field(199.0, ge=1.0, description="Quarterly plan price USD")
+    price_yearly: float = Field(599.0, ge=1.0, description="Yearly plan price USD")
+    price_lifetime: float = Field(999.0, ge=1.0, description="Lifetime plan price USD")
+
+    # State file
+    subscriptions_file: str = Field(
+        "subscriptions.json", description="Path to subscriptions state file"
+    )
+
+
 class RiskSettings(BaseModel):
     """Risk management configuration."""
 
@@ -282,6 +350,27 @@ class Settings(BaseSettings):
     state_file: str = Field(DEFAULT_STATE_FILE, alias="STATE_FILE")
     log_file: str = Field(DEFAULT_LOG_FILE, alias="LOG_FILE")
 
+    # Public channel configuration
+    public_channel_id: Optional[str] = Field(None, alias="PUBLIC_CHANNEL_ID")
+    public_channel_username: Optional[str] = Field(None, alias="PUBLIC_CHANNEL_USERNAME")
+    premium_channel_id: Optional[str] = Field(None, alias="PREMIUM_CHANNEL_ID")
+    broadcast_min_multiplier: float = Field(2.0, alias="BROADCAST_MIN_MULTIPLIER")
+    broadcast_delay_seconds: int = Field(300, alias="BROADCAST_DELAY_SECONDS")
+    show_token_address_public: bool = Field(False, alias="SHOW_TOKEN_ADDRESS_PUBLIC")
+    bot_name: str = Field("Trenches Trading Bot", alias="BOT_NAME")
+    bot_public_username: str = Field("TrenchesBot", alias="BOT_PUBLIC_USERNAME")
+
+    # Subscription configuration
+    subscriptions_enabled: bool = Field(False, alias="SUBSCRIPTIONS_ENABLED")
+    payment_sol_address: Optional[str] = Field(None, alias="PAYMENT_SOL_ADDRESS")
+    payment_usdt_bep20_address: Optional[str] = Field(None, alias="PAYMENT_USDT_BEP20_ADDRESS")
+    payment_usdc_sol_address: Optional[str] = Field(None, alias="PAYMENT_USDC_SOL_ADDRESS")
+    price_monthly: float = Field(79.0, alias="PRICE_MONTHLY")
+    price_quarterly: float = Field(199.0, alias="PRICE_QUARTERLY")
+    price_yearly: float = Field(599.0, alias="PRICE_YEARLY")
+    price_lifetime: float = Field(999.0, alias="PRICE_LIFETIME")
+    subscriptions_file: str = Field("subscriptions.json", alias="SUBSCRIPTIONS_FILE")
+
     # Risk management configuration
     risk_stop_loss_enabled: bool = Field(True, alias="STOP_LOSS_ENABLED")
     risk_stop_loss_type: str = Field("fixed_percentage", alias="STOP_LOSS_TYPE")
@@ -362,6 +451,35 @@ class Settings(BaseSettings):
             trading_capital_sol=self.risk_trading_capital_sol,
         )
 
+    @property
+    def public_channel(self) -> PublicChannelSettings:
+        """Get public channel settings as a structured object."""
+        return PublicChannelSettings(
+            public_channel_id=self.public_channel_id,
+            public_channel_username=self.public_channel_username,
+            premium_channel_id=self.premium_channel_id,
+            min_multiplier_to_broadcast=self.broadcast_min_multiplier,
+            broadcast_delay_seconds=self.broadcast_delay_seconds,
+            show_token_address_public=self.show_token_address_public,
+            bot_name=self.bot_name,
+            bot_username=self.bot_public_username,
+        )
+
+    @property
+    def subscription(self) -> SubscriptionSettings:
+        """Get subscription settings as a structured object."""
+        return SubscriptionSettings(
+            subscriptions_enabled=self.subscriptions_enabled,
+            payment_sol_address=self.payment_sol_address,
+            payment_usdt_bep20_address=self.payment_usdt_bep20_address,
+            payment_usdc_sol_address=self.payment_usdc_sol_address,
+            price_monthly=self.price_monthly,
+            price_quarterly=self.price_quarterly,
+            price_yearly=self.price_yearly,
+            price_lifetime=self.price_lifetime,
+            subscriptions_file=self.subscriptions_file,
+        )
+
 
 @lru_cache
 def get_settings() -> Settings:
@@ -388,24 +506,28 @@ def clear_settings_cache() -> None:
 def validate_environment() -> tuple[bool, list[str]]:
     """
     Validate that all required environment variables are set.
-    
+
     Returns:
         Tuple of (is_valid, list of error messages)
     """
+    # Load .env file first if it exists
+    from dotenv import load_dotenv
+    load_dotenv()
+
     errors: list[str] = []
-    
+
     required_vars = [
         ("TELEGRAM_API_ID", "Telegram API ID"),
         ("TELEGRAM_API_HASH", "Telegram API Hash"),
     ]
-    
+
     for var_name, description in required_vars:
         if not os.environ.get(var_name):
             errors.append(f"Missing required environment variable: {var_name} ({description})")
-    
+
     # Validate API ID is numeric if present
     api_id = os.environ.get("TELEGRAM_API_ID", "")
     if api_id and not api_id.isdigit():
         errors.append("TELEGRAM_API_ID must be a numeric value")
-    
+
     return len(errors) == 0, errors
