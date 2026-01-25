@@ -59,8 +59,12 @@ services:
     # Override environment variables if needed
     environment:
       - TELEGRAM_SESSION_NAME=wallet_tracker_session
+      - SESSION_FILE=/app/data/wallet_tracker_session
       - STATE_FILE=/app/data/trading_state.json
       - LOG_FILE=/app/data/trading_bot.log
+      - SUBSCRIPTIONS_FILE=/app/data/subscriptions.json
+      - HIT_RATE_FILE=/app/data/hit_rate.json
+      - KOL_TRACKER_FILE=/app/data/kol_tracker.json
       # Database connection - use 'postgres' service name
       - POSTGRES_HOST=postgres
       - POSTGRES_PORT=5432

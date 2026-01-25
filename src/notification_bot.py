@@ -27,6 +27,8 @@ from src.signal_history import SignalHistory
 from src.signal_database import SignalDatabase
 from src.strategies import StrategyManager, TakeProfitStrategy, StrategyType
 from src.constants import TRENCHES_CHANNEL_USERNAME
+from src.commercial_bot import CommercialBot
+from src.subscription_manager import SubscriptionPlan
 
 if TYPE_CHECKING:
     from src.bot import TradingBot
@@ -145,6 +147,9 @@ class NotificationBot:
         # Strategy manager for take profit strategies
         self._strategy_manager = StrategyManager()
         self._load_strategy_state()
+
+        # Commercial features (premium subscriptions, public broadcasting)
+        self._commercial: Optional[CommercialBot] = None
     
     def _load_strategy_state(self) -> None:
         """Load strategy enabled state from state file."""
@@ -208,10 +213,28 @@ class NotificationBot:
     def signal_history(self) -> SignalHistory:
         """Get signal history tracker."""
         return self._signal_history
-    
+
     @property
     def signal_db(self) -> Optional[SignalDatabase]:
         """Get signal database."""
+
+    @property
+    def commercial(self) -> Optional[CommercialBot]:
+        """Get commercial bot for premium features."""
+        return self._commercial
+
+    async def _init_commercial(self) -> None:
+        """Initialize commercial features (subscriptions, broadcasting, etc.)."""
+        if not self._client:
+            return
+
+        try:
+            self._commercial = CommercialBot(self._client, self._settings)
+            await self._commercial.initialize()
+            logger.info("✅ Commercial features initialized")
+        except Exception as e:
+            logger.warning(f"Failed to initialize commercial features: {e}")
+            self._commercial = None
         return self._signal_db
     
     def set_trading_bot(self, bot: "TradingBot") -> None:
@@ -306,7 +329,10 @@ class NotificationBot:
         )
         
         self._initialized = True
-        
+
+        # Initialize commercial features (subscriptions, broadcasting, etc.)
+        await self._init_commercial()
+
         # Send startup message
         await self._send_startup_message()
     
@@ -633,6 +659,17 @@ class NotificationBot:
             "/pause": self._cmd_pause,
             "/resume": self._cmd_resume,
             "/stats": self._cmd_stats,
+            # Commercial/Premium commands
+            "/subscribe": self._cmd_subscribe,
+            "/plans": self._cmd_plans,
+            "/verify": self._cmd_verify,
+            "/mystatus": self._cmd_my_subscription,
+            "/hitstats": self._cmd_hit_stats,
+            "/leaderboard": self._cmd_leaderboard,
+            "/kols": self._cmd_kol_list,
+            "/addkol": self._cmd_add_kol,
+            "/premium": self._cmd_premium_info,
+            "/broadcast": self._cmd_broadcast_stats,
         }
         
         handler = handlers.get(command)
@@ -701,6 +738,14 @@ class NotificationBot:
             ],
             [
                 Button.inline("❓ Help", b"cmd_help"),
+            ],
+            [
+                Button.inline("🔑 Premium", b"cmd_premium"),
+                Button.inline("📊 Hit Stats", b"cmd_hitstats"),
+            ],
+            [
+                Button.inline("🐋 KOL Wallets", b"cmd_kols"),
+                Button.inline("🏆 Leaderboard", b"cmd_leaderboard"),
             ],
         ]
     
@@ -778,6 +823,15 @@ class NotificationBot:
             "simulate_30d": lambda: self._cmd_simulate("30"),
             "simulate_7d": lambda: self._cmd_simulate("7"),
             "back_to_menu": lambda: self._cmd_menu(""),
+            # Commercial feature callbacks
+            "cmd_premium": lambda: self._cmd_premium_info(""),
+            "cmd_hitstats": lambda: self._cmd_hit_stats(""),
+            "cmd_kols": lambda: self._cmd_kol_list(""),
+            "cmd_leaderboard": lambda: self._cmd_leaderboard(""),
+            "plan_monthly": lambda: self._handle_plan_select(SubscriptionPlan.MONTHLY),
+            "plan_quarterly": lambda: self._handle_plan_select(SubscriptionPlan.QUARTERLY),
+            "plan_yearly": lambda: self._handle_plan_select(SubscriptionPlan.YEARLY),
+            "plan_lifetime": lambda: self._handle_plan_select(SubscriptionPlan.LIFETIME),
         }
         
         handler = callback_handlers.get(data)
@@ -2609,7 +2663,7 @@ class NotificationBot:
             
             if inserted:
                 logger.debug(f"Profit alert inserted to DB: {multiplier}X (msg_id={message_id})")
-                
+
                 # Update cursor if channel_id provided
                 if channel_id:
                     from src.constants import TRENCHES_CHANNEL_NAME
@@ -2618,3 +2672,197 @@ class NotificationBot:
                         channel_name=TRENCHES_CHANNEL_NAME,
                         last_message_id=message_id,
                     )
+
+    # =========================================================================
+    # COMMERCIAL/PREMIUM COMMANDS
+    # =========================================================================
+
+    async def _cmd_subscribe(self, args: str) -> None:
+        """Handle subscription command."""
+        if not self._commercial:
+            await self._send_to_admin("Premium features not enabled.")
+            return
+
+        message, buttons = await self._commercial.handle_subscribe_command(
+            user_id=self._admin_user_id,
+            username=None,
+            plan_arg=args.strip() if args else None,
+        )
+
+        if buttons:
+            await self._send_to_admin_with_buttons(message, buttons)
+        else:
+            await self._send_to_admin(message)
+
+    async def _cmd_plans(self, args: str) -> None:
+        """Show subscription plans."""
+        if not self._commercial or not self._commercial.subscriptions:
+            await self._send_to_admin(
+                "🔑 *PREMIUM FEATURES*\n\n"
+                "Premium subscriptions are not currently enabled.\n\n"
+                "Contact the admin to enable premium features."
+            )
+            return
+
+        message = self._commercial.subscriptions.format_plans_message()
+        await self._send_to_admin(message)
+
+    async def _cmd_verify(self, args: str) -> None:
+        """Verify payment transaction."""
+        if not self._commercial:
+            await self._send_to_admin("Premium features not enabled.")
+            return
+
+        if not args.strip():
+            await self._send_to_admin(
+                "❌ Usage: `/verify <transaction_hash>`\n\n"
+                "Please provide the transaction hash/signature from your payment."
+            )
+            return
+
+        message = await self._commercial.handle_verify_payment(
+            user_id=self._admin_user_id,
+            tx_hash=args.strip(),
+        )
+        await self._send_to_admin(message)
+
+    async def _cmd_my_subscription(self, args: str) -> None:
+        """Show user's subscription status."""
+        if not self._commercial or not self._commercial.subscriptions:
+            await self._send_to_admin("Subscriptions not enabled.")
+            return
+
+        sub = self._commercial.subscriptions.get_subscriber(self._admin_user_id)
+        if sub:
+            message = self._commercial.subscriptions.format_subscription_status(sub)
+        else:
+            message = "You don't have an active subscription.\n\nUse /subscribe to get started!"
+
+        await self._send_to_admin(message)
+
+    async def _handle_plan_select(self, plan: SubscriptionPlan) -> None:
+        """Handle plan selection callback."""
+        if not self._commercial:
+            await self._send_to_admin("Premium features not enabled.")
+            return
+
+        message = await self._commercial.handle_plan_selection(
+            user_id=self._admin_user_id,
+            plan=plan,
+        )
+        await self._send_to_admin(message)
+
+    async def _cmd_hit_stats(self, args: str) -> None:
+        """Show hit rate statistics."""
+        if not self._commercial:
+            await self._send_to_admin("Commercial features not enabled.")
+            return
+
+        message = self._commercial.get_public_stats()
+        await self._send_to_admin(message)
+
+    async def _cmd_leaderboard(self, args: str) -> None:
+        """Show top performers leaderboard."""
+        if not self._commercial or not self._commercial.hit_rate:
+            await self._send_to_admin("Hit rate tracking not enabled.")
+            return
+
+        message = self._commercial.hit_rate.format_leaderboard()
+        await self._send_to_admin(message)
+
+    async def _cmd_kol_list(self, args: str) -> None:
+        """Show list of tracked KOL wallets."""
+        if not self._commercial:
+            await self._send_to_admin("Commercial features not enabled.")
+            return
+
+        message = self._commercial.get_kol_wallets_list()
+        await self._send_to_admin(message)
+
+    async def _cmd_add_kol(self, args: str) -> None:
+        """Add a KOL wallet to track."""
+        if not self._commercial:
+            await self._send_to_admin("Commercial features not enabled.")
+            return
+
+        if not args.strip():
+            await self._send_to_admin(
+                "❌ Usage: `/addkol <address> <name> [type]`\n\n"
+                "Types: kol, whale, smart_money, dev, fund, insider\n\n"
+                "Example:\n"
+                "`/addkol ABC123...xyz SolanaWhale whale`"
+            )
+            return
+
+        parts = args.strip().split()
+        if len(parts) < 2:
+            await self._send_to_admin("❌ Please provide both address and name.")
+            return
+
+        address = parts[0]
+        name = parts[1]
+        wallet_type = parts[2] if len(parts) > 2 else "smart_money"
+
+        message = await self._commercial.add_kol_wallet(
+            address=address,
+            name=name,
+            wallet_type=wallet_type,
+        )
+        await self._send_to_admin(message)
+
+    async def _cmd_premium_info(self, args: str) -> None:
+        """Show premium features info."""
+        if not self._commercial:
+            message = (
+                "🔑 *PREMIUM FEATURES*\n\n"
+                "Premium features are not currently enabled.\n\n"
+                "Contact the admin to enable:\n"
+                "• Instant real-time signals\n"
+                "• KOL/Whale tracking\n"
+                "• Anti-rug protection\n"
+                "• Performance analytics"
+            )
+        else:
+            message = self._commercial.get_premium_features_message()
+
+        await self._send_to_admin(message)
+
+    async def _cmd_broadcast_stats(self, args: str) -> None:
+        """Show broadcast statistics (admin)."""
+        if not self._commercial or not self._commercial.publisher:
+            await self._send_to_admin("Broadcasting not enabled.")
+            return
+
+        message = self._commercial.publisher.format_stats_message()
+
+        # Add subscription stats if available
+        if self._commercial.subscriptions:
+            message += "\n\n" + self._commercial.get_subscription_stats()
+
+        await self._send_to_admin(message)
+
+    async def broadcast_winning_signal(
+        self,
+        token_symbol: str,
+        token_address: str,
+        multiplier: float,
+        entry_time: datetime,
+        entry_fdv: Optional[float] = None,
+        current_fdv: Optional[float] = None,
+        signal_msg_id: Optional[int] = None,
+    ) -> None:
+        """
+        Broadcast a winning signal to public/premium channels.
+
+        This should be called when a position hits a significant multiplier.
+        """
+        if self._commercial:
+            await self._commercial.broadcast_winner(
+                token_symbol=token_symbol,
+                token_address=token_address,
+                multiplier=multiplier,
+                entry_time=entry_time,
+                entry_fdv=entry_fdv,
+                current_fdv=current_fdv,
+                signal_msg_id=signal_msg_id,
+            )
