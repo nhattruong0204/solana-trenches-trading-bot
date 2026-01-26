@@ -2849,6 +2849,7 @@ class NotificationBot:
         signal_time: Optional[datetime] = None,
         raw_text: Optional[str] = None,
         channel_id: Optional[int] = None,
+        channel_name: Optional[str] = None,
     ) -> None:
         """
         Record a signal for PnL tracking (LIVE MODE).
@@ -2862,7 +2863,8 @@ class NotificationBot:
             message_id: Telegram message ID
             signal_time: Signal timestamp (defaults to now)
             raw_text: Raw message text (optional, for DB storage)
-            channel_id: Channel ID (for cursor update)
+            channel_id: Telegram channel ID (for cursor update)
+            channel_name: Logical channel name (e.g., 'volsm', 'main')
         """
         # Record to in-memory history (for quick lookups)
         await self._signal_history.add_signal(
@@ -2887,17 +2889,19 @@ class NotificationBot:
                 token_address=token_address,
                 signal_time=signal_time,
                 raw_text=raw_text,
+                channel_name=channel_name,
             )
             
             if inserted:
-                logger.debug(f"Signal inserted to DB: ${token_symbol} (msg_id={message_id})")
+                logger.debug(f"Signal inserted to DB: ${token_symbol} (msg_id={message_id}, channel={channel_name})")
                 
                 # Update cursor if channel_id provided
                 if channel_id:
                     from src.constants import TRENCHES_CHANNEL_NAME
+                    display_name = channel_name or TRENCHES_CHANNEL_NAME
                     await self._signal_db.update_channel_cursor(
                         channel_id=channel_id,
-                        channel_name=TRENCHES_CHANNEL_NAME,
+                        channel_name=display_name,
                         last_message_id=message_id,
                     )
     
@@ -2909,6 +2913,7 @@ class NotificationBot:
         alert_time: Optional[datetime] = None,
         raw_text: Optional[str] = None,
         channel_id: Optional[int] = None,
+        channel_name: Optional[str] = None,
     ) -> None:
         """
         Record a profit alert (LIVE MODE).
@@ -2921,7 +2926,8 @@ class NotificationBot:
             multiplier: Profit multiplier (e.g., 2.0 for 2X)
             alert_time: Alert timestamp
             raw_text: Raw message text
-            channel_id: Channel ID (for cursor update)
+            channel_id: Telegram channel ID (for cursor update)
+            channel_name: Logical channel name (e.g., 'volsm', 'main')
         """
         if self._signal_db:
             if alert_time is None:
@@ -2941,9 +2947,10 @@ class NotificationBot:
                 # Update cursor if channel_id provided
                 if channel_id:
                     from src.constants import TRENCHES_CHANNEL_NAME
+                    display_name = channel_name or TRENCHES_CHANNEL_NAME
                     await self._signal_db.update_channel_cursor(
                         channel_id=channel_id,
-                        channel_name=TRENCHES_CHANNEL_NAME,
+                        channel_name=display_name,
                         last_message_id=message_id,
                     )
 

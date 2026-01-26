@@ -228,9 +228,19 @@ class SignalDatabase:
     
     Connects to the wallet_tracker PostgreSQL database to query
     historical signals and profit alerts from "From The Trenches" channel.
+    
+    Supports multiple channels with channel-specific display names.
     """
     
-    CHANNEL_NAME = "From The Trenches - VOLUME + SM"
+    # Channel display names (used in database queries)
+    CHANNEL_NAME = "From The Trenches - VOLUME + SM"  # Default/primary channel
+    CHANNEL_NAME_MAIN = "From The Trenches - MAIN"
+    
+    # Map logical channel IDs to display names
+    CHANNEL_DISPLAY_NAMES = {
+        "volsm": "From The Trenches - VOLUME + SM",
+        "main": "From The Trenches - MAIN",
+    }
     
     def __init__(self, dsn: str) -> None:
         """
@@ -241,6 +251,20 @@ class SignalDatabase:
         """
         self._dsn = dsn
         self._pool: Optional[asyncpg.Pool] = None
+    
+    def _get_channel_display_name(self, channel_id: Optional[str]) -> str:
+        """
+        Get display name for a channel ID.
+        
+        Args:
+            channel_id: Logical channel identifier (e.g., 'volsm', 'main')
+            
+        Returns:
+            Display name to use in database queries
+        """
+        if channel_id is None:
+            return self.CHANNEL_NAME
+        return self.CHANNEL_DISPLAY_NAMES.get(channel_id, self.CHANNEL_NAME)
     
     async def connect(self) -> bool:
         """Establish connection pool."""
@@ -499,6 +523,7 @@ class SignalDatabase:
         token_address: str,
         signal_time: datetime,
         raw_text: str,
+        channel_name: Optional[str] = None,
     ) -> bool:
         """
         Insert a new signal into the database.
@@ -509,6 +534,8 @@ class SignalDatabase:
             token_address: Token address
             signal_time: Signal timestamp
             raw_text: Raw message text
+            channel_name: Logical channel name (e.g., 'volsm', 'main'). 
+                         If None, uses default CHANNEL_NAME.
             
         Returns:
             True if inserted, False if already exists or failed
@@ -516,13 +543,16 @@ class SignalDatabase:
         if not self._pool:
             return False
         
+        # Map logical channel name to display name
+        display_channel_name = self._get_channel_display_name(channel_name)
+        
         try:
             async with self._pool.acquire() as conn:
                 # Check if already exists
                 exists = await conn.fetchval('''
                     SELECT 1 FROM raw_telegram_messages
                     WHERE chat_title = $1 AND telegram_message_id = $2
-                ''', self.CHANNEL_NAME, message_id)
+                ''', display_channel_name, message_id)
                 
                 if exists:
                     return False
@@ -544,7 +574,7 @@ class SignalDatabase:
                 ''', 
                     message_id,
                     0,  # telegram_chat_id - we don't have it
-                    self.CHANNEL_NAME,
+                    display_channel_name,
                     raw_text,
                     signal_time,
                     0,  # sender_id

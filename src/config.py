@@ -10,7 +10,7 @@ from __future__ import annotations
 import os
 from functools import lru_cache
 from pathlib import Path
-from typing import Optional
+from typing import Optional, List
 
 from pydantic import BaseModel, Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -24,6 +24,11 @@ from src.constants import (
     DEFAULT_LOG_FILE,
     GMGN_BOT_USERNAME,
     TRENCHES_CHANNEL_USERNAME,
+    TRENCHES_CHANNEL_NAME,
+    TRENCHES_MAIN_CHANNEL_USERNAME,
+    TRENCHES_MAIN_CHANNEL_NAME,
+    CHANNEL_VOLSM,
+    CHANNEL_MAIN,
 )
 
 
@@ -248,17 +253,72 @@ class RiskSettings(BaseModel):
     )
 
 
+class MonitoredChannelConfig(BaseModel):
+    """Configuration for a single monitored signal channel."""
+
+    channel_id: str = Field(..., description="Unique channel identifier (e.g., 'volsm', 'main')")
+    username: str = Field(..., description="Telegram channel username")
+    display_name: str = Field(..., description="Human-readable channel name")
+    enabled: bool = Field(True, description="Whether to monitor this channel")
+    trading_enabled: bool = Field(True, description="Whether to execute trades from this channel")
+    commercial_mirroring: bool = Field(
+        False, description="Whether to mirror signals to commercial Premium channel"
+    )
+
+    def __hash__(self) -> int:
+        return hash(self.channel_id)
+
+    def __eq__(self, other: object) -> bool:
+        if isinstance(other, MonitoredChannelConfig):
+            return self.channel_id == other.channel_id
+        return False
+
+
 class ChannelSettings(BaseModel):
     """Telegram channel configuration."""
     
     signal_channel: str = Field(
         TRENCHES_CHANNEL_USERNAME,
-        description="Channel username to monitor for signals"
+        description="Primary channel username to monitor for signals (legacy)"
     )
     gmgn_bot: str = Field(
         GMGN_BOT_USERNAME,
         description="GMGN bot username for trade execution"
     )
+    
+    # Multi-channel configuration
+    monitored_channels: List[MonitoredChannelConfig] = Field(
+        default_factory=lambda: [
+            MonitoredChannelConfig(
+                channel_id=CHANNEL_VOLSM,
+                username=TRENCHES_CHANNEL_USERNAME,
+                display_name=TRENCHES_CHANNEL_NAME,
+                enabled=True,
+                trading_enabled=True,
+                commercial_mirroring=True,  # Only VOLSM mirrors to Premium
+            ),
+            MonitoredChannelConfig(
+                channel_id=CHANNEL_MAIN,
+                username=TRENCHES_MAIN_CHANNEL_USERNAME,
+                display_name=TRENCHES_MAIN_CHANNEL_NAME,
+                enabled=False,  # Disabled by default until parser is ready
+                trading_enabled=True,
+                commercial_mirroring=False,  # MAIN doesn't mirror to Premium
+            ),
+        ],
+        description="List of channels to monitor for signals"
+    )
+
+    def get_enabled_channels(self) -> List[MonitoredChannelConfig]:
+        """Get only enabled channels."""
+        return [ch for ch in self.monitored_channels if ch.enabled]
+
+    def get_channel_by_id(self, channel_id: str) -> Optional[MonitoredChannelConfig]:
+        """Get channel config by ID."""
+        for ch in self.monitored_channels:
+            if ch.channel_id == channel_id:
+                return ch
+        return None
 
 
 class PathSettings(BaseModel):
@@ -334,6 +394,10 @@ class Settings(BaseSettings):
         GMGN_BOT_USERNAME,
         alias="GMGN_BOT"
     )
+    
+    # Multi-channel configuration
+    main_channel_enabled: bool = Field(False, alias="MAIN_CHANNEL_ENABLED")
+    main_channel_trading: bool = Field(True, alias="MAIN_CHANNEL_TRADING")
     
     # Controller configuration (for Telegram remote control)
     controller_enabled: bool = Field(True, alias="CONTROLLER_ENABLED")
@@ -414,10 +478,33 @@ class Settings(BaseSettings):
     
     @property
     def channel(self) -> ChannelSettings:
-        """Get channel settings as a structured object."""
+        """Get channel settings as a structured object with multi-channel support."""
+        # Build monitored channels list based on environment settings
+        monitored_channels = [
+            # VOLUME + SM is always enabled (primary channel)
+            MonitoredChannelConfig(
+                channel_id=CHANNEL_VOLSM,
+                username=TRENCHES_CHANNEL_USERNAME,
+                display_name=TRENCHES_CHANNEL_NAME,
+                enabled=True,
+                trading_enabled=True,
+                commercial_mirroring=True,  # Only VOLSM mirrors to Premium
+            ),
+            # MAIN channel controlled by env var
+            MonitoredChannelConfig(
+                channel_id=CHANNEL_MAIN,
+                username=TRENCHES_MAIN_CHANNEL_USERNAME,
+                display_name=TRENCHES_MAIN_CHANNEL_NAME,
+                enabled=self.main_channel_enabled,
+                trading_enabled=self.main_channel_trading,
+                commercial_mirroring=False,  # MAIN doesn't mirror to Premium
+            ),
+        ]
+        
         return ChannelSettings(
             signal_channel=self.signal_channel,
             gmgn_bot=self.gmgn_bot,
+            monitored_channels=monitored_channels,
         )
     
     @property

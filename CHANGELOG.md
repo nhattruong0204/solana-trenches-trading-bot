@@ -16,6 +16,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 -->
 
 ### Added
+- **Multi-Channel Monitoring Support**
+  - New channel registry in `src/constants.py`: `CHANNEL_VOLSM`, `CHANNEL_MAIN` identifiers
+  - New MAIN channel constants: `TRENCHES_MAIN_CHANNEL_USERNAME`, `TRENCHES_MAIN_CHANNEL_NAME`
+  - New signal indicators: `MAIN_BUY_SIGNAL_INDICATORS`, `MAIN_PROFIT_ALERT_INDICATORS`
+  - `MonitoredChannelConfig` dataclass in `src/config.py` for channel-specific settings
+  - `ChannelSettings.monitored_channels` property builds channel list from env vars
+  - Environment variables: `MAIN_CHANNEL_ENABLED`, `MAIN_CHANNEL_TRADING` (default: False)
+  - `ParserRegistry` class in `src/parsers.py` maps channels to channel-specific parsers
+  - `MainChannelBuySignalParser` and `MainChannelProfitAlertParser` for MAIN channel format
+  - `ChannelMessageParser` for channel-aware message parsing
+  - `MessageParser` now accepts optional `channel_id` parameter for channel-specific parsing
+  - Multi-channel support in `bot.py`:
+    - `_channel_entities` dict stores all monitored channel entities
+    - `_monitored_configs` maps Telegram channel IDs to config objects
+    - `_init_channel()` now resolves all enabled channels
+    - Event handler listens to all monitored channels
+    - Messages routed to channel-specific parsers
+    - Commercial mirroring only for channels with `commercial_mirroring=True` (default: VOLSM only)
+    - Trading can be enabled/disabled per channel
+  - `SignalDatabase.CHANNEL_DISPLAY_NAMES` mapping and `_get_channel_display_name()` helper
+  - `insert_signal()` now accepts optional `channel_name` parameter
+  - `record_signal()` and `record_profit_alert()` in notification_bot accept `channel_name`
+  - Updated startup banner to show all monitored channels with status icons
+  - Plan document: `docs/PLAN_MULTI_CHANNEL.md`
+
 - AI context workflow documentation for better agent collaboration
   - `.github/copilot-instructions.md` — GitHub Copilot instructions
   - `CLAUDE_CONTEXT.md` — Claude Code context file
@@ -39,6 +64,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     `src/bot.py:454-470` (mirroring in message handler)
 
 ### Changed
+- `MessageParser.__init__()` now optionally accepts `channel_id` for channel-specific parsing
+- `_handle_buy_signal()` accepts `channel_id` and `trading_enabled` parameters
+- `_handle_profit_alert()` accepts `channel_id` parameter
 - Updated `_on_new_message()` in `bot.py` to mirror ALL messages to Premium channel (not just parsed signals)
 - `send_profit_update()` now only tracks milestones and triggers Public channel forwarding (Premium already mirrored)
 - `_forward_win_to_public()` now uses raw messages when available, with CTA appended separately

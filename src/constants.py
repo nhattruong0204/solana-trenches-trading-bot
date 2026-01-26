@@ -8,29 +8,62 @@ easily discoverable and modifiable.
 from typing import Final
 
 # ==============================================================================
-# Telegram Channel Configuration
+# Channel Identifiers (used as keys in registries)
+# ==============================================================================
+
+CHANNEL_VOLSM: Final[str] = "volsm"
+CHANNEL_MAIN: Final[str] = "main"
+
+# ==============================================================================
+# Telegram Channel Configuration - VOLUME + SM
 # ==============================================================================
 
 TRENCHES_CHANNEL_USERNAME: Final[str] = "fttrenches_volsm"
 TRENCHES_CHANNEL_NAME: Final[str] = "From The Trenches - VOLUME + SM"
 
+# ==============================================================================
+# Telegram Channel Configuration - MAIN
+# ==============================================================================
+
+TRENCHES_MAIN_CHANNEL_USERNAME: Final[str] = "fttrenches"
+TRENCHES_MAIN_CHANNEL_NAME: Final[str] = "From The Trenches - MAIN"
+
 # GMGN Bot Configuration
 GMGN_BOT_USERNAME: Final[str] = "GMGN_sol_bot"
 
 # ==============================================================================
-# Signal Detection Patterns
+# Signal Detection Patterns - VOLUME + SM Channel
 # ==============================================================================
 
-# Buy signal indicators
+# Buy signal indicators (VOLUME + SM format)
 BUY_SIGNAL_INDICATORS: Final[tuple[str, ...]] = (
     "// VOLUME + SM APE SIGNAL DETECTED",
     "`// VOLUME + SM APE SIGNAL DETECTED`",
 )
 
-# Profit alert indicators
+# Profit alert indicators (shared across channels)
 PROFIT_ALERT_INDICATORS: Final[tuple[str, ...]] = (
     "PROFIT ALERT",
     "`PROFIT ALERT`",
+)
+
+# ==============================================================================
+# Signal Detection Patterns - MAIN Channel
+# ==============================================================================
+
+# Buy signal indicators (MAIN channel format)
+# NOTE: These patterns need to be verified against actual MAIN channel messages
+MAIN_BUY_SIGNAL_INDICATORS: Final[tuple[str, ...]] = (
+    "// APE SIGNAL DETECTED",
+    "`// APE SIGNAL DETECTED`",
+    "🦍",  # Ape emoji often used in MAIN channel signals
+)
+
+# MAIN channel may have different profit alert format
+MAIN_PROFIT_ALERT_INDICATORS: Final[tuple[str, ...]] = (
+    "PROFIT ALERT",
+    "`PROFIT ALERT`",
+    "🚀",  # Rocket emoji for profit alerts
 )
 
 # ==============================================================================
