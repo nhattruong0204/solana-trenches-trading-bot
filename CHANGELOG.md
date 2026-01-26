@@ -44,11 +44,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `_forward_win_to_public()` now uses raw messages when available, with CTA appended separately
 
 ### Fixed
+- **CRITICAL: Missing methods after PR #6 merge caused bot commands to fail**
+  - `/syncsignals`, `/realpnl`, `/signalpnl` commands all crashed with AttributeError
+  - Root cause: PR #6 merge lost `_ensure_trading_client_connected()` and `_check_deleted_messages()` methods
+  - Fix: Re-added both methods to `src/notification_bot.py` (lines 254-340)
+  - Both methods were originally added in commit 7c8b9e9 and 7106535 but lost during merge
 - `/syncsignals` and `/bootstrap` commands failing with "Cannot send requests while disconnected"
   - Root cause: Code only checked if Telegram client object existed, not if it was connected
   - Fix: Added `_ensure_trading_client_connected()` helper that checks connection state
     and attempts automatic reconnection before fetching messages
-  - Location: `src/notification_bot.py:240-273` (new method), lines 2290-2300 and 2458-2468 (usage)
+  - Location: `src/notification_bot.py:254-287` (method definition)
   - Tests: Added 7 regression tests in `tests/test_notification_bot.py::TestEnsureTradingClientConnected`
 
 ### Deprecated

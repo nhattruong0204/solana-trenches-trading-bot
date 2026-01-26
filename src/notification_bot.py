@@ -251,6 +251,102 @@ class NotificationBot:
         """Set the user client for checking deleted messages."""
         self._user_client = client
     
+    async def _ensure_trading_client_connected(self) -> bool:
+        """
+        Ensure the trading bot's Telegram client is connected.
+        
+        Checks if the client is connected and attempts to reconnect if not.
+        This is necessary because the Telethon client can become disconnected
+        due to network issues, timeouts, or session invalidation.
+        
+        Returns:
+            True if client is connected (or successfully reconnected), False otherwise.
+        """
+        if not self._bot or not self._bot._client:
+            return False
+
+        client = self._bot._client
+        
+        # Check if already connected
+        if client.is_connected():
+            return True
+
+        # Attempt to reconnect
+        logger.info("Trading bot client disconnected, attempting to reconnect...")
+        try:
+            await client.connect()
+            if client.is_connected():
+                logger.info("✅ Successfully reconnected trading bot client")
+                return True
+            else:
+                logger.error("Failed to reconnect: client still not connected")
+                return False
+        except Exception as e:
+            logger.error(f"Failed to reconnect trading bot client: {e}")
+            return False
+    
+    async def _check_deleted_messages(
+        self, message_ids: list[int]
+    ) -> dict[int, bool]:
+        """
+        Check which messages have been deleted from the signal channel.
+        
+        Args:
+            message_ids: List of Telegram message IDs to check
+            
+        Returns:
+            Dict mapping message_id -> is_deleted (True if deleted, False if exists)
+        """
+        if not message_ids:
+            return {}
+
+        # Ensure trading client is connected
+        if not await self._ensure_trading_client_connected():
+            logger.warning("Cannot check deleted messages: trading client not connected")
+            return {msg_id: False for msg_id in message_ids}  # Assume not deleted if can't check
+        
+        try:
+            from src.constants import TRENCHES_CHANNEL_NAME
+            
+            client = self._bot._client
+            
+            # Get the channel entity
+            channel = None
+            async for dialog in client.iter_dialogs():
+                if dialog.name == TRENCHES_CHANNEL_NAME:
+                    channel = dialog.entity
+                    break
+
+            if not channel:
+                logger.warning(f"Channel not found: {TRENCHES_CHANNEL_NAME}")
+                return {msg_id: False for msg_id in message_ids}
+            
+            # Try to fetch each message to check if it exists
+            # Note: Telethon's get_messages returns None for deleted messages
+            deleted_status = {}
+
+            # Batch fetch messages (Telegram allows up to 100 per request)
+            BATCH_SIZE = 100
+            for i in range(0, len(message_ids), BATCH_SIZE):
+                batch = message_ids[i : i + BATCH_SIZE]
+                try:
+                    messages = await client.get_messages(channel, ids=batch)
+                    # get_messages returns a list matching the input IDs
+                    # Deleted messages return as None
+                    for msg_id, msg in zip(batch, messages):
+                        deleted_status[msg_id] = msg is None
+                except Exception as e:
+                    logger.warning(f"Error fetching message batch: {e}")
+                    # Assume not deleted if error
+                    for msg_id in batch:
+                        deleted_status[msg_id] = False
+            
+            return deleted_status
+        
+        except Exception as e:
+            logger.error(f"Error checking deleted messages: {e}")
+            return {msg_id: False for msg_id in message_ids}
+
     async def check_deleted_messages(
         self, 
         msg_ids: list[int], 
