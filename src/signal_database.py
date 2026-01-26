@@ -242,15 +242,32 @@ class SignalDatabase:
         "main": "From The Trenches - MAIN",
     }
     
-    def __init__(self, dsn: str) -> None:
+    def __init__(self, dsn: str, channel_id: Optional[str] = None) -> None:
         """
         Initialize database connection.
         
         Args:
             dsn: PostgreSQL connection string
+            channel_id: Logical channel identifier (e.g., 'volsm', 'main').
+                       Defaults to 'volsm' if not specified.
         """
         self._dsn = dsn
         self._pool: Optional[asyncpg.Pool] = None
+        self._channel_id = channel_id or "volsm"
+        # Set the active channel name for queries
+        self._active_channel_name = self.CHANNEL_DISPLAY_NAMES.get(
+            self._channel_id, self.CHANNEL_NAME
+        )
+    
+    @property
+    def active_channel_name(self) -> str:
+        """Get the active channel name used for database queries."""
+        return self._active_channel_name
+    
+    @property
+    def channel_id(self) -> str:
+        """Get the logical channel ID (e.g., 'volsm', 'main')."""
+        return self._channel_id
     
     def _get_channel_display_name(self, channel_id: Optional[str]) -> str:
         """
@@ -263,8 +280,8 @@ class SignalDatabase:
             Display name to use in database queries
         """
         if channel_id is None:
-            return self.CHANNEL_NAME
-        return self.CHANNEL_DISPLAY_NAMES.get(channel_id, self.CHANNEL_NAME)
+            return self._active_channel_name
+        return self.CHANNEL_DISPLAY_NAMES.get(channel_id, self._active_channel_name)
     
     async def connect(self) -> bool:
         """Establish connection pool."""
@@ -324,7 +341,7 @@ class SignalDatabase:
                     ORDER BY message_timestamp DESC
                 '''
                 
-                signals = await conn.fetch(signals_query, self.CHANNEL_NAME)
+                signals = await conn.fetch(signals_query, self._active_channel_name)
                 
                 if not signals:
                     return []
@@ -354,7 +371,7 @@ class SignalDatabase:
                     AND raw_text LIKE '%PROFIT ALERT%'
                 '''
                 
-                alerts = await conn.fetch(alerts_query, self.CHANNEL_NAME)
+                alerts = await conn.fetch(alerts_query, self._active_channel_name)
                 
                 # Build profit map
                 profit_map: dict[int, list[ProfitAlert]] = {}
@@ -484,13 +501,13 @@ class SignalDatabase:
                     SELECT COUNT(*) FROM raw_telegram_messages
                     WHERE chat_title = $1
                     AND raw_text LIKE '%APE SIGNAL DETECTED%'
-                ''', self.CHANNEL_NAME)
+                ''', self._active_channel_name)
                 
                 alerts = await conn.fetchval('''
                     SELECT COUNT(*) FROM raw_telegram_messages
                     WHERE chat_title = $1
                     AND raw_text LIKE '%PROFIT ALERT%'
-                ''', self.CHANNEL_NAME)
+                ''', self._active_channel_name)
                 
                 return {
                     "total_signals": total or 0,
@@ -510,7 +527,7 @@ class SignalDatabase:
                 result = await conn.fetchval('''
                     SELECT MAX(telegram_message_id) FROM raw_telegram_messages
                     WHERE chat_title = $1
-                ''', self.CHANNEL_NAME)
+                ''', self._active_channel_name)
                 return result
         except Exception as e:
             logger.error(f"Failed to get latest message ID: {e}")
@@ -619,7 +636,7 @@ class SignalDatabase:
                 exists = await conn.fetchval('''
                     SELECT 1 FROM raw_telegram_messages
                     WHERE chat_title = $1 AND telegram_message_id = $2
-                ''', self.CHANNEL_NAME, message_id)
+                ''', self._active_channel_name, message_id)
                 
                 if exists:
                     return False
@@ -645,7 +662,7 @@ class SignalDatabase:
                 ''', 
                     message_id,
                     0,  # telegram_chat_id
-                    self.CHANNEL_NAME,
+                    self._active_channel_name,
                     raw_text,
                     raw_json,
                     alert_time,
@@ -808,7 +825,7 @@ class SignalDatabase:
                         AND raw_json IS NULL
                         AND message_timestamp >= $2
                         ORDER BY message_timestamp DESC
-                    ''', self.CHANNEL_NAME, cutoff)
+                    ''', self._active_channel_name, cutoff)
                 else:
                     rows = await conn.fetch('''
                         SELECT id, telegram_message_id, message_timestamp, raw_text
@@ -817,7 +834,7 @@ class SignalDatabase:
                         AND source_bot = 'trenches_sync'
                         AND raw_json IS NULL
                         ORDER BY message_timestamp DESC
-                    ''', self.CHANNEL_NAME)
+                    ''', self._active_channel_name)
                 
                 signals = []
                 for row in rows:

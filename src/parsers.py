@@ -233,7 +233,11 @@ class MainChannelBuySignalParser(SignalParser[BuySignal]):
     Parser for buy signals from the MAIN trenches channel.
     
     The MAIN channel has a different format than VOLSM.
-    Detects messages containing "APE SIGNAL DETECTED" (without VOLUME + SM prefix).
+    Detects two types of signals:
+    - "🚀 NEW-LAUNCH SIGNAL" - New token launch signals
+    - "// MID-SIZED SIGNAL DETECTED" - Smart money mid-sized signals
+    
+    Both are treated as "ape" signals for tracking purposes.
     """
     
     def __init__(self) -> None:
@@ -302,7 +306,8 @@ class MainChannelProfitAlertParser(SignalParser[ProfitAlert]):
     """
     Parser for profit alerts from the MAIN trenches channel.
     
-    Uses MAIN-specific indicators which may differ from VOLSM.
+    The MAIN channel has a different format than VOLSM.
+    Detects messages containing "PROFIT ALERT 🚀" pattern.
     """
     
     def __init__(self) -> None:

@@ -16,6 +16,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 -->
 
 ### Added
+- **MAIN Channel Separate Tracker Bot** (`main_tracker.py`, `src/main_tracker_bot.py`)
+  - New standalone bot to track signals from @fttrenches_sol (MAIN channel)
+  - Does NOT execute trades - signal tracking and PnL analysis only
+  - Commands: `/syncsignals`, `/bootstrap`, `/signalpnl`, `/realpnl`, `/menu`, `/help`
+  - Shares PostgreSQL database with trading bot (uses `chat_title` column for channel distinction)
+  - Uses existing parsers: `MainChannelBuySignalParser`, `MainChannelProfitAlertParser`
+  - New entry point: `main_tracker.py`
+  - New environment variable: `MAIN_BOT_TOKEN` (separate Telegram bot token)
+  - New docker-compose service: `main-tracker` (runs alongside `trading-bot`)
+  - Resource-efficient: 256MB RAM limit vs 512MB for trading bot
+  
+- **SignalDatabase Channel Filtering** (`src/signal_database.py`)
+  - Added `channel_id` constructor parameter to `SignalDatabase` class
+  - New `_active_channel_name` property for per-instance channel filtering
+  - All database queries now use instance-level channel filter
+  - Supports running multiple tracker bots against same database
+
 - **Multi-Channel Monitoring Support**
   - New channel registry in `src/constants.py`: `CHANNEL_VOLSM`, `CHANNEL_MAIN` identifiers
   - New MAIN channel constants: `TRENCHES_MAIN_CHANNEL_USERNAME`, `TRENCHES_MAIN_CHANNEL_NAME`
