@@ -240,7 +240,41 @@ class NotificationBot:
     def set_trading_bot(self, bot: "TradingBot") -> None:
         """Set the trading bot reference."""
         self._bot = bot
-    
+
+    async def _ensure_trading_client_connected(self) -> bool:
+        """
+        Ensure the trading bot's Telegram client is connected.
+
+        Checks if the client is connected and attempts to reconnect if not.
+        This is necessary because the Telethon client can become disconnected
+        due to network issues, timeouts, or session invalidation.
+
+        Returns:
+            True if client is connected (or successfully reconnected), False otherwise.
+        """
+        if not self._bot or not self._bot._client:
+            return False
+
+        client = self._bot._client
+
+        # Check if already connected
+        if client.is_connected():
+            return True
+
+        # Attempt to reconnect
+        logger.info("Trading bot client disconnected, attempting to reconnect...")
+        try:
+            await client.connect()
+            if client.is_connected():
+                logger.info("✅ Successfully reconnected trading bot client")
+                return True
+            else:
+                logger.error("Failed to reconnect: client still not connected")
+                return False
+        except Exception as e:
+            logger.error(f"Failed to reconnect trading bot client: {e}")
+            return False
+
     @property
     def buy_amount_sol(self) -> float:
         return self._buy_amount_sol
@@ -2252,18 +2286,23 @@ class NotificationBot:
         if not self._signal_db:
             await self._send_to_admin("❌ Database not configured")
             return
-        
-        if not self._bot or not self._bot._client:
-            await self._send_to_admin("❌ Trading bot not connected")
+
+        # Ensure trading bot client is connected (reconnect if needed)
+        if not await self._ensure_trading_client_connected():
+            await self._send_to_admin(
+                "❌ *Trading bot not connected*\n\n"
+                "The Telegram client is disconnected and could not be reconnected.\n"
+                "Please restart the bot or check network connectivity."
+            )
             return
-        
+
         try:
             # Ensure channel state table exists (for upgrades)
             await self._signal_db.ensure_channel_state_table()
-            
+
             # Use the trading bot's Telegram client to fetch messages
             client = self._bot._client
-            
+
             # Get the channel entity
             from src.constants import TRENCHES_CHANNEL_NAME
             channel = None
@@ -2419,17 +2458,22 @@ class NotificationBot:
         if not self._signal_db:
             await self._send_to_admin("❌ Database not configured")
             return
-        
-        if not self._bot or not self._bot._client:
-            await self._send_to_admin("❌ Trading bot not connected")
+
+        # Ensure trading bot client is connected (reconnect if needed)
+        if not await self._ensure_trading_client_connected():
+            await self._send_to_admin(
+                "❌ *Trading bot not connected*\n\n"
+                "The Telegram client is disconnected and could not be reconnected.\n"
+                "Please restart the bot or check network connectivity."
+            )
             return
-        
+
         try:
             # Ensure channel state table exists
             await self._signal_db.ensure_channel_state_table()
-            
+
             client = self._bot._client
-            
+
             # Get the channel entity
             from src.constants import TRENCHES_CHANNEL_NAME
             channel = None

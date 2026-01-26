@@ -397,9 +397,122 @@ class TestNotificationBotMethods:
             assert strategy.id == "trailing_stop_15"
 
 
+class TestEnsureTradingClientConnected:
+    """Tests for _ensure_trading_client_connected method.
+
+    This tests the fix for the bug where /syncsignals and /bootstrap
+    commands would fail with "Cannot send requests while disconnected"
+    when the trading bot's Telegram client was disconnected.
+    """
+
+    @pytest.fixture
+    def bot(self):
+        """Create a NotificationBot instance."""
+        settings = MagicMock()
+        settings.trading_buy_amount_sol = 0.1
+        settings.trading_sell_percentage = 50
+        settings.trading_min_multiplier = 2.0
+        settings.trading_max_positions = 10
+        settings.gmgn_wallet = "test_wallet"
+        settings.state_file = "trading_state.json"
+
+        with patch.object(NotificationBot, '_load_strategy_state'):
+            return NotificationBot(
+                api_id=12345,
+                api_hash="test_hash",
+                bot_token="test_token",
+                settings=settings,
+                admin_user_id=99999,
+            )
+
+    @pytest.mark.asyncio
+    async def test_returns_false_when_no_trading_bot(self, bot):
+        """Test returns False when trading bot is not set."""
+        bot._bot = None
+
+        result = await bot._ensure_trading_client_connected()
+
+        assert result is False
+
+    @pytest.mark.asyncio
+    async def test_returns_false_when_no_client(self, bot):
+        """Test returns False when trading bot has no client."""
+        mock_trading_bot = MagicMock()
+        mock_trading_bot._client = None
+        bot._bot = mock_trading_bot
+
+        result = await bot._ensure_trading_client_connected()
+
+        assert result is False
+
+    @pytest.mark.asyncio
+    async def test_returns_true_when_already_connected(self, bot):
+        """Test returns True when client is already connected."""
+        mock_client = MagicMock()
+        mock_client.is_connected.return_value = True
+
+        mock_trading_bot = MagicMock()
+        mock_trading_bot._client = mock_client
+        bot._bot = mock_trading_bot
+
+        result = await bot._ensure_trading_client_connected()
+
+        assert result is True
+        mock_client.is_connected.assert_called_once()
+        mock_client.connect.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_attempts_reconnect_when_disconnected(self, bot):
+        """Test attempts to reconnect when client is disconnected."""
+        mock_client = MagicMock()
+        # First call: disconnected, second call (after connect): connected
+        mock_client.is_connected.side_effect = [False, True]
+        mock_client.connect = AsyncMock()
+
+        mock_trading_bot = MagicMock()
+        mock_trading_bot._client = mock_client
+        bot._bot = mock_trading_bot
+
+        result = await bot._ensure_trading_client_connected()
+
+        assert result is True
+        mock_client.connect.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_returns_false_when_reconnect_fails(self, bot):
+        """Test returns False when reconnection attempt fails."""
+        mock_client = MagicMock()
+        mock_client.is_connected.return_value = False
+        mock_client.connect = AsyncMock(side_effect=Exception("Connection failed"))
+
+        mock_trading_bot = MagicMock()
+        mock_trading_bot._client = mock_client
+        bot._bot = mock_trading_bot
+
+        result = await bot._ensure_trading_client_connected()
+
+        assert result is False
+
+    @pytest.mark.asyncio
+    async def test_returns_false_when_reconnect_succeeds_but_still_disconnected(self, bot):
+        """Test returns False when connect() succeeds but client still reports disconnected."""
+        mock_client = MagicMock()
+        # Always reports disconnected even after connect attempt
+        mock_client.is_connected.return_value = False
+        mock_client.connect = AsyncMock()
+
+        mock_trading_bot = MagicMock()
+        mock_trading_bot._client = mock_client
+        bot._bot = mock_trading_bot
+
+        result = await bot._ensure_trading_client_connected()
+
+        assert result is False
+
+
 class TestNotificationBotAsync:
     """Async tests for NotificationBot."""
-    
+
     @pytest.fixture
     def mock_settings(self):
         """Create mock settings."""

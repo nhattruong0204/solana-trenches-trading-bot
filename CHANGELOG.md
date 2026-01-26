@@ -27,7 +27,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 <!-- Changes to existing functionality -->
 
 ### Fixed
-<!-- Bug fixes -->
+- `/syncsignals` and `/bootstrap` commands failing with "Cannot send requests while disconnected"
+  - Root cause: Code only checked if Telegram client object existed, not if it was connected
+  - Fix: Added `_ensure_trading_client_connected()` helper that checks connection state
+    and attempts automatic reconnection before fetching messages
+  - Location: `src/notification_bot.py:240-273` (new method), lines 2290-2300 and 2458-2468 (usage)
+  - Tests: Added 7 regression tests in `tests/test_notification_bot.py::TestEnsureTradingClientConnected`
 
 ### Deprecated
 <!-- Features that will be removed in future versions -->
