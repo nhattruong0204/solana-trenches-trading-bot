@@ -65,6 +65,7 @@ services:
       - SUBSCRIPTIONS_FILE=/app/data/subscriptions.json
       - HIT_RATE_FILE=/app/data/hit_rate.json
       - KOL_TRACKER_FILE=/app/data/kol_tracker.json
+      - SIGNAL_MAPPINGS_FILE=/app/data/signal_mappings.json
       # Database connection - use 'postgres' service name
       - POSTGRES_HOST=postgres
       - POSTGRES_PORT=5432

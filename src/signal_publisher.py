@@ -1,236 +1,168 @@
 """
-Public Channel Signal Publisher for Marketing.
+Signal Publisher - AstroX-style Channel Broadcasting.
 
-This module broadcasts significant winning trades to a public Telegram channel
-for marketing purposes, similar to how AstroX Hub showcases winning calls.
+This module implements the same broadcasting pattern as AstroX Hub:
+1. Premium Channel: Mirror of Trenches signals + profit update replies
+2. Public Channel: Only winning signals (2X+) with CTA for marketing
 
-Features:
-- Broadcasts signals that hit configurable multiplier thresholds (2X, 5X, 10X, etc.)
-- Tracks hit rate statistics for credibility
-- Formats messages professionally for marketing
-- Delays broadcasts to avoid front-running by free users
-- Includes call-to-action for premium subscription
+Flow:
+1. New signal from Trenches -> Forward to Premium channel immediately
+2. Profit alert (2X, 3X, etc.) -> Send UPDATE as REPLY to the original in Premium
+3. First 2X+ hit -> Forward ape signal + update to Public channel with CTA
 """
 
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
-from dataclasses import dataclass, field
+import random
+from dataclasses import dataclass, field, asdict
 from datetime import datetime, timezone, timedelta
-from enum import Enum
+from pathlib import Path
 from typing import Any, Optional, TYPE_CHECKING
 
 if TYPE_CHECKING:
     from telethon import TelegramClient
+    from telethon.tl.types import Message
 
 logger = logging.getLogger(__name__)
 
 
-class SignalTier(str, Enum):
-    """Signal performance tiers for broadcasting."""
-    TIER_2X = "2X"
-    TIER_3X = "3X"
-    TIER_5X = "5X"
-    TIER_10X = "10X"
-    TIER_20X = "20X"
-    TIER_50X = "50X"
-    TIER_100X = "100X"
+# Rotating CTA messages like AstroX uses
+CTA_MESSAGES = [
+    "✨ **Your Silent Edge in Memes Trading**",
+    "☄️ **This play went LIVE in Pro hub before volume exploded**",
+    "📊 **Premium members received this entry in Real-time**",
+    "🚫 **Rug pulls are filtered out by our rug-counter system**",
+    "👁‍🗨 **Seeing KOL,Whale's real time transactions on Memes → Instant Automated Copy Trading**",
+    "⚡ **Real-time signals. No delays. Maximum alpha.**",
+    "🎯 **Precision entries that the public never sees**",
+    "🔮 **The future of memecoin trading is automated**",
+]
 
 
 @dataclass
 class BroadcastConfig:
-    """Configuration for public channel broadcasting."""
+    """Configuration for channel broadcasting."""
 
-    # Public channel settings
+    # Channel IDs
     public_channel_id: Optional[str] = None
-    public_channel_username: Optional[str] = None
-
-    # Broadcast thresholds
-    min_multiplier_to_broadcast: float = 2.0  # Minimum X to broadcast
-    broadcast_delay_seconds: int = 300  # 5 minute delay for free channel
-
-    # Message settings
-    show_token_address: bool = False  # Hide address in public (premium only)
-    show_entry_price: bool = False
-    include_cta: bool = True  # Call-to-action for premium
-
-    # Premium settings
     premium_channel_id: Optional[str] = None
-    premium_instant_broadcast: bool = True  # Premium gets instant alerts
+    source_channel_id: Optional[str] = None  # Trenches channel to mirror
+
+    # Broadcast settings
+    min_multiplier_to_broadcast: float = 2.0
+    show_token_address_public: bool = False
 
     # Branding
-    bot_name: str = "Trenches Trading Bot"
-    bot_username: str = "TrenchesBot"
+    bot_name: str = "SolSleuth"
+    bot_username: str = "SolSleuthBot"
+    premium_channel_link: str = ""
 
 
 @dataclass
-class BroadcastSignal:
-    """A signal prepared for broadcasting."""
+class SignalMapping:
+    """Maps source signal to premium channel message for replies."""
 
-    token_symbol: str
-    token_address: str
-    entry_time: datetime
-    alert_time: datetime
-    multiplier: float
+    source_msg_id: int  # Message ID in Trenches channel
+    premium_msg_id: int  # Message ID in Premium channel
+    public_msg_id: Optional[int] = None  # Message ID in Public channel (if forwarded)
+    token_symbol: str = ""
+    token_address: str = ""
     entry_fdv: Optional[float] = None
-    current_fdv: Optional[float] = None
-    signal_msg_id: Optional[int] = None
+    entry_time: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    current_multiplier: float = 1.0
+    last_update_multiplier: float = 0.0  # Last multiplier we sent an update for
+    forwarded_to_public: bool = False
 
-    @property
-    def tier(self) -> SignalTier:
-        """Get the performance tier for this signal."""
-        if self.multiplier >= 100:
-            return SignalTier.TIER_100X
-        elif self.multiplier >= 50:
-            return SignalTier.TIER_50X
-        elif self.multiplier >= 20:
-            return SignalTier.TIER_20X
-        elif self.multiplier >= 10:
-            return SignalTier.TIER_10X
-        elif self.multiplier >= 5:
-            return SignalTier.TIER_5X
-        elif self.multiplier >= 3:
-            return SignalTier.TIER_3X
-        else:
-            return SignalTier.TIER_2X
-
-    @property
-    def hold_duration_hours(self) -> float:
-        """Calculate holding duration in hours."""
-        delta = self.alert_time - self.entry_time
-        return delta.total_seconds() / 3600
-
-    @property
-    def tier_emoji(self) -> str:
-        """Get emoji for the tier."""
-        emojis = {
-            SignalTier.TIER_2X: "🟢",
-            SignalTier.TIER_3X: "🟢",
-            SignalTier.TIER_5X: "🔥",
-            SignalTier.TIER_10X: "🚀",
-            SignalTier.TIER_20X: "💎",
-            SignalTier.TIER_50X: "👑",
-            SignalTier.TIER_100X: "🏆",
+    def to_dict(self) -> dict:
+        return {
+            "source_msg_id": self.source_msg_id,
+            "premium_msg_id": self.premium_msg_id,
+            "public_msg_id": self.public_msg_id,
+            "token_symbol": self.token_symbol,
+            "token_address": self.token_address,
+            "entry_fdv": self.entry_fdv,
+            "entry_time": self.entry_time.isoformat(),
+            "current_multiplier": self.current_multiplier,
+            "last_update_multiplier": self.last_update_multiplier,
+            "forwarded_to_public": self.forwarded_to_public,
         }
-        return emojis.get(self.tier, "📈")
 
+    @classmethod
+    def from_dict(cls, data: dict) -> "SignalMapping":
+        entry_time = data.get("entry_time")
+        if isinstance(entry_time, str):
+            entry_time = datetime.fromisoformat(entry_time)
+        elif entry_time is None:
+            entry_time = datetime.now(timezone.utc)
 
-@dataclass
-class HitRateStats:
-    """Statistics for hit rate tracking."""
-
-    total_signals: int = 0
-    signals_2x: int = 0
-    signals_3x: int = 0
-    signals_5x: int = 0
-    signals_10x: int = 0
-    signals_20x: int = 0
-
-    # Time-based stats
-    last_24h_signals: int = 0
-    last_24h_winners: int = 0
-    last_7d_signals: int = 0
-    last_7d_winners: int = 0
-
-    # Performance metrics
-    avg_multiplier: float = 0.0
-    best_multiplier: float = 0.0
-
-    @property
-    def hit_rate_2x(self) -> float:
-        """Percentage of signals that hit 2X."""
-        if self.total_signals == 0:
-            return 0.0
-        return (self.signals_2x / self.total_signals) * 100
-
-    @property
-    def hit_rate_5x(self) -> float:
-        """Percentage of signals that hit 5X."""
-        if self.total_signals == 0:
-            return 0.0
-        return (self.signals_5x / self.total_signals) * 100
-
-    @property
-    def hit_rate_10x(self) -> float:
-        """Percentage of signals that hit 10X."""
-        if self.total_signals == 0:
-            return 0.0
-        return (self.signals_10x / self.total_signals) * 100
-
-    @property
-    def daily_hit_rate(self) -> float:
-        """24h win rate."""
-        if self.last_24h_signals == 0:
-            return 0.0
-        return (self.last_24h_winners / self.last_24h_signals) * 100
-
-    @property
-    def weekly_hit_rate(self) -> float:
-        """7d win rate."""
-        if self.last_7d_signals == 0:
-            return 0.0
-        return (self.last_7d_winners / self.last_7d_signals) * 100
+        return cls(
+            source_msg_id=data["source_msg_id"],
+            premium_msg_id=data["premium_msg_id"],
+            public_msg_id=data.get("public_msg_id"),
+            token_symbol=data.get("token_symbol", ""),
+            token_address=data.get("token_address", ""),
+            entry_fdv=data.get("entry_fdv"),
+            entry_time=entry_time,
+            current_multiplier=data.get("current_multiplier", 1.0),
+            last_update_multiplier=data.get("last_update_multiplier", 0.0),
+            forwarded_to_public=data.get("forwarded_to_public", False),
+        )
 
 
 class SignalPublisher:
     """
-    Broadcasts winning signals to public marketing channel.
+    AstroX-style signal broadcasting system.
 
-    This creates the "Top Trades" showcase similar to AstroX,
-    demonstrating the bot's performance to attract premium subscribers.
+    Premium Channel:
+    - Mirrors all ape signals from Trenches
+    - Sends profit UPDATE messages as replies to original signals
 
-    Usage:
-        publisher = SignalPublisher(client, config)
-        await publisher.broadcast_winner(signal)
+    Public Channel:
+    - Only shows winning signals (2X+)
+    - Forwards ape signal + update on first significant win
+    - Includes CTA to join premium
     """
 
     def __init__(
         self,
         client: "TelegramClient",
         config: BroadcastConfig,
+        state_file: str = "signal_mappings.json",
     ) -> None:
-        """
-        Initialize the signal publisher.
-
-        Args:
-            client: Telegram client for sending messages
-            config: Broadcast configuration
-        """
         self._client = client
         self._config = config
+        self._state_file = Path(state_file)
+
         self._public_channel = None
         self._premium_channel = None
-        self._broadcast_queue: list[BroadcastSignal] = []
-        self._broadcast_history: list[BroadcastSignal] = []
-        self._stats = HitRateStats()
         self._initialized = False
+
+        # Signal mappings: source_msg_id -> SignalMapping
+        self._mappings: dict[int, SignalMapping] = {}
 
     @property
     def config(self) -> BroadcastConfig:
-        """Get broadcast configuration."""
         return self._config
 
     @property
-    def stats(self) -> HitRateStats:
-        """Get current hit rate statistics."""
-        return self._stats
+    def is_initialized(self) -> bool:
+        return self._initialized
 
     async def initialize(self) -> bool:
-        """
-        Initialize channel connections.
-
-        Returns:
-            True if at least one channel was resolved
-        """
+        """Initialize channel connections and load state."""
         success = False
 
-        # Resolve public channel
-        if self._config.public_channel_id or self._config.public_channel_username:
+        # Load existing mappings
+        await self._load_state()
+
+        # Connect to public channel
+        if self._config.public_channel_id:
             try:
-                channel_ref = self._config.public_channel_id or self._config.public_channel_username
-                # Convert to int if it's a numeric channel ID
-                if channel_ref and channel_ref.lstrip('-').isdigit():
+                channel_ref = self._config.public_channel_id
+                if channel_ref.lstrip('-').isdigit():
                     channel_ref = int(channel_ref)
                 self._public_channel = await self._client.get_entity(channel_ref)
                 logger.info(f"✅ Public channel connected: {self._get_channel_name(self._public_channel)}")
@@ -238,12 +170,11 @@ class SignalPublisher:
             except Exception as e:
                 logger.warning(f"Could not connect to public channel: {e}")
 
-        # Resolve premium channel
+        # Connect to premium channel
         if self._config.premium_channel_id:
             try:
                 premium_ref = self._config.premium_channel_id
-                # Convert to int if it's a numeric channel ID
-                if premium_ref and premium_ref.lstrip('-').isdigit():
+                if premium_ref.lstrip('-').isdigit():
                     premium_ref = int(premium_ref)
                 self._premium_channel = await self._client.get_entity(premium_ref)
                 logger.info(f"✅ Premium channel connected: {self._get_channel_name(self._premium_channel)}")
@@ -255,254 +186,432 @@ class SignalPublisher:
         return success
 
     def _get_channel_name(self, channel) -> str:
-        """Get display name of a channel."""
         if hasattr(channel, 'title'):
             return channel.title
         return str(channel)
 
-    async def queue_broadcast(self, signal: BroadcastSignal) -> None:
-        """
-        Queue a signal for delayed broadcast to public channel.
-
-        Args:
-            signal: Signal to broadcast
-        """
-        if signal.multiplier < self._config.min_multiplier_to_broadcast:
-            logger.debug(f"Signal {signal.token_symbol} below broadcast threshold")
+    async def _load_state(self) -> None:
+        """Load signal mappings from file."""
+        if not self._state_file.exists():
             return
 
-        # Update stats
-        self._update_stats(signal)
+        try:
+            with open(self._state_file, 'r') as f:
+                data = json.load(f)
+                for key, value in data.items():
+                    self._mappings[int(key)] = SignalMapping.from_dict(value)
+            logger.info(f"Loaded {len(self._mappings)} signal mappings")
+        except Exception as e:
+            logger.error(f"Failed to load signal mappings: {e}")
 
-        # Add to history
-        self._broadcast_history.append(signal)
+    async def _save_state(self) -> None:
+        """Save signal mappings to file."""
+        try:
+            data = {str(k): v.to_dict() for k, v in self._mappings.items()}
+            with open(self._state_file, 'w') as f:
+                json.dump(data, f, indent=2)
+        except Exception as e:
+            logger.error(f"Failed to save signal mappings: {e}")
 
-        # Broadcast to premium immediately
-        if self._premium_channel and self._config.premium_instant_broadcast:
-            await self._broadcast_to_premium(signal)
+    # =========================================================================
+    # APE SIGNAL FORWARDING (Trenches -> Premium)
+    # =========================================================================
 
-        # Queue for delayed public broadcast
-        self._broadcast_queue.append(signal)
+    async def forward_ape_signal(
+        self,
+        source_msg_id: int,
+        token_symbol: str,
+        token_address: str,
+        entry_fdv: Optional[float] = None,
+        raw_message: str = "",
+    ) -> Optional[int]:
+        """
+        Forward an ape signal from Trenches to Premium channel.
 
-        # Schedule delayed broadcast
-        asyncio.create_task(self._delayed_broadcast(signal))
+        Args:
+            source_msg_id: Original message ID in Trenches channel
+            token_symbol: Token symbol (e.g., $PEPE)
+            token_address: Token contract address
+            entry_fdv: Entry FDV in USD
+            raw_message: Original message text
 
-        logger.info(
-            f"Queued broadcast: ${signal.token_symbol} {signal.multiplier:.1f}X "
-            f"(delay: {self._config.broadcast_delay_seconds}s)"
+        Returns:
+            Message ID in premium channel, or None if failed
+        """
+        if not self._premium_channel:
+            logger.debug("Premium channel not configured, skipping forward")
+            return None
+
+        # Check if already forwarded
+        if source_msg_id in self._mappings:
+            logger.debug(f"Signal {source_msg_id} already forwarded")
+            return self._mappings[source_msg_id].premium_msg_id
+
+        # Format the ape signal message for premium channel
+        message = self._format_ape_signal(
+            token_symbol=token_symbol,
+            token_address=token_address,
+            entry_fdv=entry_fdv,
         )
 
-    async def broadcast_immediately(self, signal: BroadcastSignal) -> None:
-        """
-        Broadcast a signal immediately to all channels.
-        Used for major wins (10X+) that deserve immediate attention.
-
-        Args:
-            signal: Signal to broadcast
-        """
-        # Update stats
-        self._update_stats(signal)
-        self._broadcast_history.append(signal)
-
-        # Broadcast to both channels
-        if self._premium_channel:
-            await self._broadcast_to_premium(signal)
-
-        if self._public_channel:
-            await self._broadcast_to_public(signal)
-
-    def _update_stats(self, signal: BroadcastSignal) -> None:
-        """Update hit rate statistics with a new signal."""
-        self._stats.total_signals += 1
-
-        if signal.multiplier >= 2:
-            self._stats.signals_2x += 1
-        if signal.multiplier >= 3:
-            self._stats.signals_3x += 1
-        if signal.multiplier >= 5:
-            self._stats.signals_5x += 1
-        if signal.multiplier >= 10:
-            self._stats.signals_10x += 1
-        if signal.multiplier >= 20:
-            self._stats.signals_20x += 1
-
-        # Update best multiplier
-        if signal.multiplier > self._stats.best_multiplier:
-            self._stats.best_multiplier = signal.multiplier
-
-        # Update average (rolling)
-        total = self._stats.total_signals
-        old_avg = self._stats.avg_multiplier
-        self._stats.avg_multiplier = old_avg + (signal.multiplier - old_avg) / total
-
-    async def _delayed_broadcast(self, signal: BroadcastSignal) -> None:
-        """Wait and then broadcast to public channel."""
-        await asyncio.sleep(self._config.broadcast_delay_seconds)
-
-        if self._public_channel:
-            await self._broadcast_to_public(signal)
-
-        # Remove from queue
-        if signal in self._broadcast_queue:
-            self._broadcast_queue.remove(signal)
-
-    async def _broadcast_to_public(self, signal: BroadcastSignal) -> None:
-        """Broadcast to public marketing channel."""
-        if not self._public_channel:
-            return
-
-        message = self._format_public_message(signal)
-
         try:
-            await self._client.send_message(
-                self._public_channel,
-                message,
-                parse_mode="markdown",
-            )
-            logger.info(f"Broadcast to public: ${signal.token_symbol} {signal.multiplier:.1f}X")
-        except Exception as e:
-            logger.error(f"Failed to broadcast to public channel: {e}")
-
-    async def _broadcast_to_premium(self, signal: BroadcastSignal) -> None:
-        """Broadcast to premium channel with full details."""
-        if not self._premium_channel:
-            return
-
-        message = self._format_premium_message(signal)
-
-        try:
-            await self._client.send_message(
+            sent = await self._client.send_message(
                 self._premium_channel,
                 message,
                 parse_mode="markdown",
             )
-            logger.info(f"Broadcast to premium: ${signal.token_symbol} {signal.multiplier:.1f}X")
+
+            # Create mapping
+            mapping = SignalMapping(
+                source_msg_id=source_msg_id,
+                premium_msg_id=sent.id,
+                token_symbol=token_symbol,
+                token_address=token_address,
+                entry_fdv=entry_fdv,
+                entry_time=datetime.now(timezone.utc),
+            )
+            self._mappings[source_msg_id] = mapping
+
+            # Save state
+            asyncio.create_task(self._save_state())
+
+            logger.info(f"📨 Forwarded ${token_symbol} to Premium (msg:{sent.id})")
+            return sent.id
+
         except Exception as e:
-            logger.error(f"Failed to broadcast to premium channel: {e}")
+            logger.error(f"Failed to forward ape signal: {e}")
+            return None
 
-    def _format_public_message(self, signal: BroadcastSignal) -> str:
-        """
-        Format message for public marketing channel.
+    def _format_ape_signal(
+        self,
+        token_symbol: str,
+        token_address: str,
+        entry_fdv: Optional[float] = None,
+    ) -> str:
+        """Format ape signal message like AstroX."""
+        # Format FDV
+        fdv_str = self._format_fdv(entry_fdv) if entry_fdv else "N/A"
 
-        Designed to showcase wins and attract subscribers,
-        similar to AstroX Top Trades format.
-        """
-        emoji = signal.tier_emoji
-        tier = signal.tier.value
-
-        # Header with dramatic effect
-        if signal.multiplier >= 10:
-            header = f"{emoji} **{tier} MONSTER CALL** {emoji}"
-        elif signal.multiplier >= 5:
-            header = f"{emoji} **{tier} WINNING CALL** {emoji}"
-        else:
-            header = f"{emoji} **{tier} PROFIT ALERT** {emoji}"
-
-        # Build message
         lines = [
-            header,
+            f"🔹`${token_symbol}` - SOL",
             "",
-            f"Token: **${signal.token_symbol}**",
-            f"Multiplier: **{signal.multiplier:.1f}X** ({(signal.multiplier - 1) * 100:.0f}% profit)",
+            f"**Entry:** **{fdv_str}**",
+            "",
+            f"**Chart:** [MevX](https://mevx.io/solana/{token_address}) - [gmgn](https://gmgn.ai/sol/token/{token_address})",
+            "",
+            f"`{token_address}`",
+            "",
+            f"🔸**{self._config.bot_name} LIVE Trading**🔸",
         ]
 
-        # Add FDV if available
-        if signal.entry_fdv and signal.current_fdv:
-            entry_fdv_str = self._format_fdv(signal.entry_fdv)
-            current_fdv_str = self._format_fdv(signal.current_fdv)
-            lines.append(f"FDV: {entry_fdv_str} -> {current_fdv_str}")
+        return "\n".join(lines)
 
-        # Hold duration
-        hold_hrs = signal.hold_duration_hours
-        if hold_hrs < 1:
-            hold_str = f"{int(hold_hrs * 60)} minutes"
-        elif hold_hrs < 24:
-            hold_str = f"{hold_hrs:.1f} hours"
-        else:
-            hold_str = f"{hold_hrs / 24:.1f} days"
-        lines.append(f"Hold Time: {hold_str}")
+    # =========================================================================
+    # PROFIT UPDATE MESSAGES (Reply to original in Premium)
+    # =========================================================================
 
-        # Timestamp
-        lines.append(f"Called: {signal.entry_time.strftime('%Y-%m-%d %H:%M UTC')}")
+    async def send_profit_update(
+        self,
+        source_msg_id: int,
+        multiplier: float,
+        current_fdv: Optional[float] = None,
+    ) -> bool:
+        """
+        Send a profit UPDATE message as a reply to the original ape signal.
 
-        # Hit rate stats
-        lines.extend([
+        Args:
+            source_msg_id: Original message ID in Trenches channel
+            multiplier: Current multiplier (e.g., 2.5 for 2.5X)
+            current_fdv: Current FDV
+
+        Returns:
+            True if update was sent successfully
+        """
+        if not self._premium_channel:
+            return False
+
+        # Get the mapping
+        mapping = self._mappings.get(source_msg_id)
+        if not mapping:
+            logger.warning(f"No mapping found for source message {source_msg_id}")
+            return False
+
+        # Update current multiplier
+        mapping.current_multiplier = multiplier
+
+        # Check if we should send an update (only on new milestones)
+        milestone = self._get_milestone(multiplier)
+        last_milestone = self._get_milestone(mapping.last_update_multiplier)
+
+        if milestone <= last_milestone:
+            # No new milestone reached
+            return False
+
+        # Calculate hold time
+        hold_time = datetime.now(timezone.utc) - mapping.entry_time
+        hold_str = self._format_hold_time(hold_time)
+
+        # Format UPDATE message
+        update_msg = self._format_profit_update(
+            token_symbol=mapping.token_symbol,
+            multiplier=multiplier,
+            entry_fdv=mapping.entry_fdv,
+            current_fdv=current_fdv,
+            hold_time=hold_str,
+        )
+
+        try:
+            # Send as REPLY to the original ape signal
+            sent = await self._client.send_message(
+                self._premium_channel,
+                update_msg,
+                reply_to=mapping.premium_msg_id,
+                parse_mode="markdown",
+            )
+
+            mapping.last_update_multiplier = multiplier
+            asyncio.create_task(self._save_state())
+
+            logger.info(f"📈 Sent {milestone}X update for ${mapping.token_symbol} (reply to {mapping.premium_msg_id})")
+
+            # Check if we should forward to public channel
+            if multiplier >= self._config.min_multiplier_to_broadcast and not mapping.forwarded_to_public:
+                await self._forward_win_to_public(mapping, multiplier, current_fdv, hold_str)
+
+            return True
+
+        except Exception as e:
+            logger.error(f"Failed to send profit update: {e}")
+            return False
+
+    def _format_profit_update(
+        self,
+        token_symbol: str,
+        multiplier: float,
+        entry_fdv: Optional[float],
+        current_fdv: Optional[float],
+        hold_time: str,
+    ) -> str:
+        """Format profit UPDATE message like AstroX."""
+        milestone = int(multiplier)
+        entry_str = self._format_fdv(entry_fdv) if entry_fdv else "N/A"
+        ath_str = self._format_fdv(current_fdv) if current_fdv else "N/A"
+
+        # Calculate PnL based on $100 investment
+        pnl_start = 100
+        pnl_end = int(pnl_start * multiplier)
+        pnl_profit = pnl_end - pnl_start
+
+        # Get random CTA message
+        cta = random.choice(CTA_MESSAGES)
+
+        lines = [
+            f"🔹 **UPDATE:** `${token_symbol}` - **SOL**",
             "",
-            "═══════════════════════════",
-            f"📊 Our Performance:",
-            f"• Win Rate (2X+): **{self._stats.hit_rate_2x:.0f}%**",
-            f"• Win Rate (5X+): **{self._stats.hit_rate_5x:.0f}%**",
-            f"• Best Call: **{self._stats.best_multiplier:.0f}X**",
-            f"• Total Signals: {self._stats.total_signals}",
-            "═══════════════════════════",
-        ])
+            f"🚩 **{milestone}X Hit From Entry**",
+            "",
+            f"💶 **PnL:** ${pnl_start} → ${pnl_end:,}  (PnL +${pnl_profit:,})",
+            "",
+            f"🔖 **Entry:** {entry_str}",
+            f"📈 **ATH:** {ath_str}",
+            "",
+            f"📋 **ROI:** {milestone}x",
+            f"⌛️ **Time:** {hold_time}",
+            f"⛓️ **Chain:** SOL",
+            "",
+            cta,
+            "",
+            f"🔸 **{self._config.bot_name} Pro Trading** 🔸",
+        ]
 
-        # Call to action
-        if self._config.include_cta:
+        return "\n".join(lines)
+
+    def _get_milestone(self, multiplier: float) -> int:
+        """Get the milestone tier for a multiplier."""
+        if multiplier >= 100:
+            return 100
+        elif multiplier >= 50:
+            return 50
+        elif multiplier >= 20:
+            return 20
+        elif multiplier >= 10:
+            return 10
+        elif multiplier >= 5:
+            return 5
+        elif multiplier >= 4:
+            return 4
+        elif multiplier >= 3:
+            return 3
+        elif multiplier >= 2:
+            return 2
+        else:
+            return 0
+
+    # =========================================================================
+    # PUBLIC CHANNEL (Marketing - Winners Only)
+    # =========================================================================
+
+    async def _forward_win_to_public(
+        self,
+        mapping: SignalMapping,
+        multiplier: float,
+        current_fdv: Optional[float],
+        hold_time: str,
+    ) -> bool:
+        """
+        Forward a winning signal to the public channel.
+
+        This is called on the first 2X+ hit.
+        Forwards: Ape signal + Update message + CTA
+        """
+        if not self._public_channel:
+            return False
+
+        if mapping.forwarded_to_public:
+            return False
+
+        try:
+            # 1. Send the ape signal first
+            ape_msg = self._format_ape_signal_public(
+                token_symbol=mapping.token_symbol,
+                token_address=mapping.token_address if self._config.show_token_address_public else None,
+                entry_fdv=mapping.entry_fdv,
+            )
+
+            sent_ape = await self._client.send_message(
+                self._public_channel,
+                ape_msg,
+                parse_mode="markdown",
+            )
+
+            mapping.public_msg_id = sent_ape.id
+
+            # 2. Send the update as reply
+            update_msg = self._format_profit_update_public(
+                token_symbol=mapping.token_symbol,
+                multiplier=multiplier,
+                entry_fdv=mapping.entry_fdv,
+                current_fdv=current_fdv,
+                hold_time=hold_time,
+            )
+
+            await self._client.send_message(
+                self._public_channel,
+                update_msg,
+                reply_to=sent_ape.id,
+                parse_mode="markdown",
+            )
+
+            mapping.forwarded_to_public = True
+            asyncio.create_task(self._save_state())
+
+            logger.info(f"🎯 Forwarded ${mapping.token_symbol} {int(multiplier)}X win to Public channel")
+            return True
+
+        except Exception as e:
+            logger.error(f"Failed to forward win to public channel: {e}")
+            return False
+
+    def _format_ape_signal_public(
+        self,
+        token_symbol: str,
+        token_address: Optional[str],
+        entry_fdv: Optional[float],
+    ) -> str:
+        """Format ape signal for public channel (may hide address)."""
+        fdv_str = self._format_fdv(entry_fdv) if entry_fdv else "N/A"
+
+        lines = [
+            f"🔹`${token_symbol}` - SOL",
+            "",
+            f"**Entry:** **{fdv_str}**",
+            "",
+        ]
+
+        if token_address:
             lines.extend([
+                f"**Chart:** [gmgn](https://gmgn.ai/sol/token/{token_address})",
                 "",
-                "🔑 **Want INSTANT alerts + Full Details?**",
-                "",
-                "Premium members receive:",
-                "• Instant real-time signals (no delay)",
-                "• Full token addresses for sniping",
-                "• Entry/exit price levels",
-                "• Anti-rug security checks",
-                "• KOL/Whale tracking alerts",
-                "",
-                f"👉 **Join Premium**: @{self._config.bot_username}",
-                "",
-                f"_Powered by {self._config.bot_name}_",
+                f"`{token_address}`",
             ])
+        else:
+            lines.append("_Token address available for Premium members_")
+
+        lines.extend([
+            "",
+            f"🔸**{self._config.bot_name} Trading**🔸",
+        ])
 
         return "\n".join(lines)
 
-    def _format_premium_message(self, signal: BroadcastSignal) -> str:
-        """
-        Format message for premium channel with full details.
+    def _format_profit_update_public(
+        self,
+        token_symbol: str,
+        multiplier: float,
+        entry_fdv: Optional[float],
+        current_fdv: Optional[float],
+        hold_time: str,
+    ) -> str:
+        """Format profit update for public channel with CTA."""
+        milestone = int(multiplier)
+        entry_str = self._format_fdv(entry_fdv) if entry_fdv else "N/A"
+        ath_str = self._format_fdv(current_fdv) if current_fdv else "N/A"
 
-        Premium members get complete information for immediate action.
-        """
-        emoji = signal.tier_emoji
-        tier = signal.tier.value
+        pnl_start = 100
+        pnl_end = int(pnl_start * multiplier)
+        pnl_profit = pnl_end - pnl_start
 
-        header = f"{emoji} **{tier} PROFIT ALERT** {emoji}"
+        cta = random.choice(CTA_MESSAGES)
 
         lines = [
-            header,
+            f"🔹 **UPDATE:** `${token_symbol}` - **SOL**",
             "",
-            f"Token: **${signal.token_symbol}**",
-            f"Address: `{signal.token_address}`",
-            f"Multiplier: **{signal.multiplier:.1f}X**",
+            f"🚩 **{milestone}X Hit From Entry**",
+            "",
+            f"💶 **PnL:** ${pnl_start} → ${pnl_end:,}  (PnL +${pnl_profit:,})",
+            "",
+            f"🔖 **Entry:** {entry_str}",
+            f"📈 **ATH:** {ath_str}",
+            "",
+            f"📋 **ROI:** {milestone}x",
+            f"⌛️ **Time:** {hold_time}",
+            f"⛓️ **Chain:** SOL",
+            "",
+            cta,
+            "",
+            "═══════════════════════════",
+            "",
+            "🔑 **Want INSTANT signals + Full token addresses?**",
+            "",
+            "Premium members receive:",
+            "• ⚡ Real-time signals (no delay)",
+            "• 📋 Full token addresses for sniping",
+            "• 🐋 KOL/Whale tracking alerts",
+            "• 🛡️ Anti-rug protection",
+            "",
         ]
 
-        # Add FDV details
-        if signal.entry_fdv:
-            lines.append(f"Entry FDV: {self._format_fdv(signal.entry_fdv)}")
-        if signal.current_fdv:
-            lines.append(f"Current FDV: {self._format_fdv(signal.current_fdv)}")
+        # Add premium channel link if configured
+        if self._config.premium_channel_link:
+            lines.append(f"👉 **Join Premium:** {self._config.premium_channel_link}")
+        else:
+            lines.append(f"👉 **Join Premium:** @{self._config.bot_username}")
 
-        # Timing
         lines.extend([
             "",
-            f"Entry: {signal.entry_time.strftime('%Y-%m-%d %H:%M:%S UTC')}",
-            f"Alert: {signal.alert_time.strftime('%Y-%m-%d %H:%M:%S UTC')}",
-            f"Hold: {signal.hold_duration_hours:.1f}h",
-        ])
-
-        # Quick links
-        lines.extend([
-            "",
-            "📈 **Quick Links:**",
-            f"• [DexScreener](https://dexscreener.com/solana/{signal.token_address})",
-            f"• [Birdeye](https://birdeye.so/token/{signal.token_address})",
-            f"• [GMGN](https://gmgn.ai/sol/token/{signal.token_address})",
+            f"🔸 **{self._config.bot_name} Pro Trading** 🔸",
         ])
 
         return "\n".join(lines)
 
-    def _format_fdv(self, fdv: float) -> str:
+    # =========================================================================
+    # UTILITY METHODS
+    # =========================================================================
+
+    def _format_fdv(self, fdv: Optional[float]) -> str:
         """Format FDV for display."""
+        if fdv is None:
+            return "N/A"
         if fdv >= 1_000_000_000:
             return f"${fdv / 1_000_000_000:.1f}B"
         elif fdv >= 1_000_000:
@@ -512,76 +621,30 @@ class SignalPublisher:
         else:
             return f"${fdv:.0f}"
 
-    async def broadcast_daily_stats(self) -> None:
-        """Broadcast daily performance summary to public channel."""
-        if not self._public_channel:
-            return
+    def _format_hold_time(self, delta: timedelta) -> str:
+        """Format hold time for display."""
+        hours = delta.total_seconds() / 3600
+        if hours < 1:
+            return f"{int(delta.total_seconds() / 60)} Min"
+        elif hours < 24:
+            return f"{int(hours)} Hour" if int(hours) == 1 else f"{int(hours)} Hours"
+        else:
+            days = int(hours / 24)
+            return f"{days} Day" if days == 1 else f"{days} Days"
 
-        message = self._format_daily_stats()
+    def get_mapping(self, source_msg_id: int) -> Optional[SignalMapping]:
+        """Get mapping for a source message ID."""
+        return self._mappings.get(source_msg_id)
 
-        try:
-            await self._client.send_message(
-                self._public_channel,
-                message,
-                parse_mode="markdown",
-            )
-            logger.info("Broadcast daily stats")
-        except Exception as e:
-            logger.error(f"Failed to broadcast daily stats: {e}")
+    def get_stats(self) -> dict:
+        """Get publisher statistics."""
+        total = len(self._mappings)
+        forwarded = sum(1 for m in self._mappings.values() if m.forwarded_to_public)
+        winners = sum(1 for m in self._mappings.values() if m.current_multiplier >= 2)
 
-    def _format_daily_stats(self) -> str:
-        """Format daily statistics message."""
-        now = datetime.now(timezone.utc)
-
-        lines = [
-            "📊 **DAILY PERFORMANCE REPORT**",
-            f"_{now.strftime('%Y-%m-%d')}_",
-            "",
-            "═══════════════════════════",
-            "",
-            f"📈 **Hit Rates:**",
-            f"• 2X+ Win Rate: **{self._stats.hit_rate_2x:.0f}%**",
-            f"• 5X+ Win Rate: **{self._stats.hit_rate_5x:.0f}%**",
-            f"• 10X+ Win Rate: **{self._stats.hit_rate_10x:.0f}%**",
-            "",
-            f"🏆 **Achievements:**",
-            f"• Total Signals: {self._stats.total_signals}",
-            f"• 2X Hits: {self._stats.signals_2x}",
-            f"• 5X Hits: {self._stats.signals_5x}",
-            f"• 10X Hits: {self._stats.signals_10x}",
-            f"• 20X+ Hits: {self._stats.signals_20x}",
-            "",
-            f"• Best Call: **{self._stats.best_multiplier:.0f}X**",
-            f"• Average: {self._stats.avg_multiplier:.1f}X",
-            "",
-            "═══════════════════════════",
-            "",
-            "🔑 **Ready to trade like an insider?**",
-            "",
-            f"👉 Join Premium: @{self._config.bot_username}",
-            "",
-            f"_Powered by {self._config.bot_name}_",
-        ]
-
-        return "\n".join(lines)
-
-    def get_pending_broadcasts(self) -> list[BroadcastSignal]:
-        """Get signals pending broadcast."""
-        return self._broadcast_queue.copy()
-
-    def get_broadcast_history(self, limit: int = 50) -> list[BroadcastSignal]:
-        """Get recent broadcast history."""
-        return self._broadcast_history[-limit:]
-
-    def format_stats_message(self) -> str:
-        """Format statistics for display."""
-        return (
-            "📊 **BROADCAST STATISTICS**\n\n"
-            f"• Total Signals: {self._stats.total_signals}\n"
-            f"• 2X+ Hits: {self._stats.signals_2x} ({self._stats.hit_rate_2x:.0f}%)\n"
-            f"• 5X+ Hits: {self._stats.signals_5x} ({self._stats.hit_rate_5x:.0f}%)\n"
-            f"• 10X+ Hits: {self._stats.signals_10x} ({self._stats.hit_rate_10x:.0f}%)\n"
-            f"• Best Call: {self._stats.best_multiplier:.0f}X\n"
-            f"• Avg Multiplier: {self._stats.avg_multiplier:.1f}X\n"
-            f"• Pending Broadcasts: {len(self._broadcast_queue)}"
-        )
+        return {
+            "total_signals": total,
+            "forwarded_to_public": forwarded,
+            "winners_2x": winners,
+            "win_rate": (winners / total * 100) if total > 0 else 0,
+        }
