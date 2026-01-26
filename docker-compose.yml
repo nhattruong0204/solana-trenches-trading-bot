@@ -142,8 +142,9 @@ services:
       - POSTGRES_USER=postgres
       - POSTGRES_DATABASE=wallet_tracker
     
-    # Entry point for MAIN tracker (not the trading bot)
-    command: ["python", "main_tracker.py"]
+    # Override entrypoint for MAIN tracker (not the trading bot)
+    entrypoint: ["python", "-u", "main_tracker.py"]
+    command: []
     
     # Resource limits (smaller footprint than trading bot)
     deploy:

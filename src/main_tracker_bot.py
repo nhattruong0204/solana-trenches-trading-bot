@@ -32,8 +32,8 @@ from telethon.errors import MessageIdInvalidError
 
 from src.signal_database import SignalDatabase
 from src.constants import (
-    MAIN_CHANNEL_NAME,
-    MAIN_CHANNEL_USERNAME,
+    TRENCHES_MAIN_CHANNEL_NAME,
+    TRENCHES_MAIN_CHANNEL_USERNAME,
     MAIN_BUY_SIGNAL_INDICATORS,
     MAIN_PROFIT_ALERT_INDICATORS,
     MULTIPLIER_PATTERN,
@@ -298,8 +298,8 @@ class MainTrackerBot:
         """Handle /start command."""
         await self._send_to_admin(
             "🔔 *MAIN Channel Signal Tracker*\n\n"
-            f"Tracking: `{MAIN_CHANNEL_NAME}`\n"
-            f"Channel: @{MAIN_CHANNEL_USERNAME}\n\n"
+            f"Tracking: `{TRENCHES_MAIN_CHANNEL_NAME}`\n"
+            f"Channel: @{TRENCHES_MAIN_CHANNEL_USERNAME}\n\n"
             "This bot tracks signals from the MAIN channel and "
             "calculates theoretical PnL statistics.\n\n"
             "Use /menu to see available actions."
@@ -408,7 +408,7 @@ class MainTrackerBot:
         
         # Fetch uncached messages
         try:
-            channel = await self._user_client.get_entity(MAIN_CHANNEL_USERNAME)
+            channel = await self._user_client.get_entity(TRENCHES_MAIN_CHANNEL_USERNAME)
             messages = await self._user_client.get_messages(channel, ids=uncached)
             
             for mid, msg in zip(uncached, messages):
@@ -446,7 +446,7 @@ class MainTrackerBot:
             await self._signal_db.ensure_channel_state_table()
             
             # Get the channel entity
-            channel = await self._user_client.get_entity(MAIN_CHANNEL_USERNAME)
+            channel = await self._user_client.get_entity(TRENCHES_MAIN_CHANNEL_USERNAME)
             channel_id = channel.id
             
             # Get current cursor state
@@ -559,7 +559,7 @@ class MainTrackerBot:
             # Update cursor
             await self._signal_db.update_channel_cursor(
                 channel_id=channel_id,
-                channel_name=MAIN_CHANNEL_NAME,
+                channel_name=TRENCHES_MAIN_CHANNEL_NAME,
                 last_message_id=max_message_id,
             )
             
@@ -604,7 +604,7 @@ class MainTrackerBot:
         try:
             await self._signal_db.ensure_channel_state_table()
             
-            channel = await self._user_client.get_entity(MAIN_CHANNEL_USERNAME)
+            channel = await self._user_client.get_entity(TRENCHES_MAIN_CHANNEL_USERNAME)
             channel_id = channel.id
             
             # Check if already bootstrapped
@@ -720,7 +720,7 @@ class MainTrackerBot:
             # Mark bootstrap complete
             await self._signal_db.update_channel_cursor(
                 channel_id=channel_id,
-                channel_name=MAIN_CHANNEL_NAME,
+                channel_name=TRENCHES_MAIN_CHANNEL_NAME,
                 last_message_id=max_message_id,
                 bootstrap_completed=True,
             )
