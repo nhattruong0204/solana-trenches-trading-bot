@@ -52,16 +52,19 @@ async def verify_messages():
     print(f"Found {len(signals)} signals in last 30 days\n")
     
     # Take most recent 30 signals for testing
-    recent_signals = signals[:30] if len(signals) > 30 else signals
+    recent_signals = signals[:50] if len(signals) > 50 else signals
     
-    # Connect to Telegram
+    # Connect to Telegram - use existing session
+    session_name = settings.telegram.session_name or 'wallet_tracker_session'
     client = TelegramClient(
-        'verify_session',
+        session_name,
         settings.telegram.api_id,
         settings.telegram.api_hash
     )
     
-    await client.start(phone=settings.telegram.phone)
+    await client.connect()
+    if not await client.is_user_authorized():
+        raise RuntimeError("Session not authorized. Please run the main bot first to authenticate.")
     
     try:
         # Get channel entity
@@ -72,8 +75,12 @@ async def verify_messages():
         
         deleted_count = 0
         existing_count = 0
+        deleted_signals = []
+        existing_signals = []
         
-        for signal in recent_signals:
+        for signal_with_pnl in recent_signals:
+            # SignalWithPnL has a .signal attribute that contains the TokenSignal
+            signal = signal_with_pnl.signal
             msg_id = signal.telegram_msg_id
             symbol = signal.token_symbol
             timestamp = signal.timestamp
@@ -84,19 +91,22 @@ async def verify_messages():
                 
                 if message and not message.deleted:
                     existing_count += 1
+                    existing_signals.append((msg_id, symbol, timestamp))
                     print(f"✅ Message {msg_id} EXISTS - ${symbol} ({timestamp})")
                 else:
                     deleted_count += 1
+                    deleted_signals.append((msg_id, symbol, timestamp))
                     print(f"❌ Message {msg_id} DELETED - ${symbol} ({timestamp})")
                     
             except MessageIdInvalidError:
                 deleted_count += 1
+                deleted_signals.append((msg_id, symbol, timestamp))
                 print(f"❌ Message {msg_id} INVALID - ${symbol} ({timestamp})")
             except Exception as e:
                 print(f"⚠️  Message {msg_id} ERROR - ${symbol} ({timestamp}): {e}")
             
             # Rate limit
-            await asyncio.sleep(0.5)
+            await asyncio.sleep(0.3)
         
         print("-" * 80)
         print(f"\nSummary:")
@@ -108,9 +118,13 @@ async def verify_messages():
             print(f"\n⚠️  Deletion rate: {deleted_count / len(recent_signals) * 100:.1f}%")
             print(f"\nThis means {deleted_count} messages have been deleted from the channel.")
             print("These will show 'Message does not exist' when clicked.")
+            
+            print(f"\n📋 Deleted Signal Message IDs:")
+            for msg_id, symbol, ts in deleted_signals:
+                print(f"   - {msg_id}: ${symbol} ({ts})")
         
     finally:
-        await signal_db.close()
+        await signal_db.disconnect()
         await client.disconnect()
 
 

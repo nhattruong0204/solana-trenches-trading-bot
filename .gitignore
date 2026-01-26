@@ -35,7 +35,9 @@ htmlcov/
 
 # Environment and secrets - NEVER COMMIT THESE
 .env
+.env.example
 *.session
+.pub
 
 # State and logs
 trading_state.json
