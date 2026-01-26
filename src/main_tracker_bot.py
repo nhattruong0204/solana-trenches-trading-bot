@@ -722,7 +722,7 @@ class MainTrackerBot:
                 channel_id=channel_id,
                 channel_name=TRENCHES_MAIN_CHANNEL_NAME,
                 last_message_id=max_message_id,
-                bootstrap_completed=True,
+                mark_bootstrap_complete=True,
             )
             
             message = (

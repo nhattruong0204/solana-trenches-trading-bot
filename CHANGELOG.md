@@ -89,6 +89,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `_forward_win_to_public()` now uses raw messages when available, with CTA appended separately
 
 ### Fixed
+- **CRITICAL: MAIN channel `/bootstrap` command failing with "database is locked"**
+  - Root cause 1: Parameter name mismatch - `_cmd_bootstrap_signals()` was calling
+    `update_channel_cursor(bootstrap_completed=True)` but the method signature expects
+    `mark_bootstrap_complete=True`. This caused a TypeError.
+  - Root cause 2: Session file conflict - both `trading-bot` and `main-tracker` could
+    potentially use the same Telegram session file, causing SQLite locking errors.
+  - Fix: Corrected parameter name in `src/main_tracker_bot.py:725`
+  - Fix: Updated `docker-compose.yml` to use dedicated session file `/app/data/main_tracker.session`
+    for main-tracker service (separate from trading-bot's `wallet_tracker_session`)
+  - Fix: Updated `.env.example` to document separate session requirement
+  - Tests: Added regression tests in `tests/test_main_tracker_bot.py`
 - `/syncsignals` and `/bootstrap` commands failing with "Cannot send requests while disconnected"
   - Root cause: Code only checked if Telegram client object existed, not if it was connected
   - Fix: Added `_ensure_trading_client_connected()` helper that checks connection state

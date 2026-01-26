@@ -134,7 +134,10 @@ services:
     
     # Environment variables for MAIN tracker
     environment:
-      - SESSION_FILE=/app/data/vps_session.session
+      # Use dedicated session file for main-tracker to avoid SQLite locking conflicts
+      # IMPORTANT: Do NOT use the same session file as trading-bot
+      - MAIN_SESSION_FILE=/app/data/main_tracker.session
+      - SESSION_FILE=/app/data/main_tracker.session
       - MAIN_LOG_FILE=/app/data/main_tracker.log
       # Database connection - uses same PostgreSQL
       - POSTGRES_HOST=postgres
