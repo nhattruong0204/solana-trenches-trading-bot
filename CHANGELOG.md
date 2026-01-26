@@ -22,6 +22,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `docs/ARCHITECTURE.md` — System architecture documentation
   - `docs/CONVENTIONS.md` — Code conventions and standards
   - `.vscode/claude-prompts.code-snippets` — VS Code prompt snippets
+- Deleted signal detection for `/signalpnl` and `/realpnl` commands
+  - New `_check_deleted_messages()` helper method to check if signals still exist in channel
+  - Deleted signals are marked with strikethrough text (~$TOKEN~) and 🗑️ emoji
+  - Summary message now shows count of signals deleted by channel owner
+  - Helps track how many signals were removed (potential rugs/scams)
+  - Location: `src/notification_bot.py:280-340` (new method), lines 1455-1460, 1610-1618 (signalpnl), 
+    lines 1700-1705, 1865-1873 (realpnl)
 
 ### Changed
 <!-- Changes to existing functionality -->

@@ -56,7 +56,7 @@ main() {
     print_step "Checking required files..."
     check_file ".env"
     check_file "wallet_tracker_session.session"
-    check_file "docker compose.yml"
+    check_file "docker-compose.yml"
     check_file "Dockerfile"
 
     # Create deployment package

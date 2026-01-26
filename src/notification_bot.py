@@ -275,6 +275,68 @@ class NotificationBot:
             logger.error(f"Failed to reconnect trading bot client: {e}")
             return False
 
+    async def _check_deleted_messages(
+        self, message_ids: list[int]
+    ) -> dict[int, bool]:
+        """
+        Check which messages have been deleted from the signal channel.
+
+        Args:
+            message_ids: List of Telegram message IDs to check
+
+        Returns:
+            Dict mapping message_id -> is_deleted (True if deleted, False if exists)
+        """
+        if not message_ids:
+            return {}
+
+        # Ensure trading client is connected
+        if not await self._ensure_trading_client_connected():
+            logger.warning("Cannot check deleted messages: trading client not connected")
+            return {msg_id: False for msg_id in message_ids}  # Assume not deleted if can't check
+
+        try:
+            from src.constants import TRENCHES_CHANNEL_NAME
+
+            client = self._bot._client
+
+            # Get the channel entity
+            channel = None
+            async for dialog in client.iter_dialogs():
+                if dialog.name == TRENCHES_CHANNEL_NAME:
+                    channel = dialog.entity
+                    break
+
+            if not channel:
+                logger.warning(f"Channel not found: {TRENCHES_CHANNEL_NAME}")
+                return {msg_id: False for msg_id in message_ids}
+
+            # Try to fetch each message to check if it exists
+            # Note: Telethon's get_messages returns None for deleted messages
+            deleted_status = {}
+
+            # Batch fetch messages (Telegram allows up to 100 per request)
+            BATCH_SIZE = 100
+            for i in range(0, len(message_ids), BATCH_SIZE):
+                batch = message_ids[i : i + BATCH_SIZE]
+                try:
+                    messages = await client.get_messages(channel, ids=batch)
+                    # get_messages returns a list matching the input IDs
+                    # Deleted messages return as None
+                    for msg_id, msg in zip(batch, messages):
+                        deleted_status[msg_id] = msg is None
+                except Exception as e:
+                    logger.warning(f"Error fetching message batch: {e}")
+                    # Assume not deleted if error
+                    for msg_id in batch:
+                        deleted_status[msg_id] = False
+
+            return deleted_status
+
+        except Exception as e:
+            logger.error(f"Error checking deleted messages: {e}")
+            return {msg_id: False for msg_id in message_ids}
+
     @property
     def buy_amount_sol(self) -> float:
         return self._buy_amount_sol
@@ -1388,6 +1450,12 @@ class NotificationBot:
             )
             return
         
+        # Check for deleted messages in the channel
+        await self._send_to_admin(f"🔍 Checking for deleted signals...")
+        message_ids = [s.signal.telegram_msg_id for s in signals]
+        deleted_status = await self._check_deleted_messages(message_ids)
+        deleted_count = sum(1 for is_deleted in deleted_status.values() if is_deleted)
+        
         # Calculate SOL profits for each signal
         token_results = []
         total_invested_sol = 0.0
@@ -1422,12 +1490,16 @@ class NotificationBot:
             total_buy_fees += buy_fee
             total_sell_fees += sell_fee
             
+            # Check if this signal was deleted from the channel
+            is_deleted = deleted_status.get(s.signal.telegram_msg_id, False)
+            
             token_results.append({
                 'signal': s,
                 'multiplier': mult,
                 'sol_profit': sol_profit,
                 'invested': invested,
                 'returned': returned,
+                'is_deleted': is_deleted,
             })
         
         # Sort by SOL profit (descending - best first)
@@ -1476,7 +1548,8 @@ class NotificationBot:
             f"📈 *Overview*\n"
             f"• Total Signals: `{total}`\n"
             f"• With Profit Alert: `{len(with_profit)}`\n"
-            f"• No Profit Alert: `{len(losers)}`\n\n"
+            f"• No Profit Alert: `{len(losers)}`\n"
+            f"• 🗑️ Deleted by Channel: `{deleted_count}`\n\n"
             f"📊 *Win/Loss*\n"
             f"• {win_emoji} Win Rate: `{win_rate:.1f}%`\n"
             f"• Winners: `{len(with_profit)}`\n"
@@ -1494,6 +1567,7 @@ class NotificationBot:
             s = tr['signal']
             sol_profit = tr['sol_profit']
             mult = tr['multiplier']
+            is_deleted = tr.get('is_deleted', False)
             token_address = s.signal.token_address
             telegram_msg_id = s.signal.telegram_msg_id
             
@@ -1519,8 +1593,15 @@ class NotificationBot:
                 mult_str = f"[{mult:.2f}X]({dex_link})"
             
             profit_emoji = "🟢" if sol_profit >= 0 else "🔴"
-            # Token symbol links to original signal message in the channel
-            line = f"{i}. [${s.signal.token_symbol}]({signal_link}) {emoji} {mult_str} | [G]({gmgn_link}) → {profit_emoji}`{sol_profit:+.3f}` SOL\n"
+            
+            # Format with strikethrough if deleted
+            if is_deleted:
+                # Use strikethrough for deleted signals: ~text~
+                token_name = f"~[${s.signal.token_symbol}]({signal_link})~ 🗑️"
+            else:
+                token_name = f"[${s.signal.token_symbol}]({signal_link})"
+            
+            line = f"{i}. {token_name} {emoji} {mult_str} | [G]({gmgn_link}) → {profit_emoji}`{sol_profit:+.3f}` SOL\n"
             token_lines.append(line)
         
         # Send token list in chunks
@@ -1624,6 +1705,12 @@ class NotificationBot:
             )
             return
         
+        # Check for deleted messages in the channel
+        await self._send_to_admin(f"🔍 Checking for deleted signals...")
+        message_ids = [s.telegram_msg_id for s in signals]
+        deleted_status = await self._check_deleted_messages(message_ids)
+        deleted_count = sum(1 for is_deleted in deleted_status.values() if is_deleted)
+        
         # Progress message
         progress_msg = await self._send_to_admin(
             f"🔍 Fetching live prices from DexScreener...\n"
@@ -1682,11 +1769,15 @@ class NotificationBot:
             total_buy_fees += buy_fee
             total_sell_fees += sell_fee
             
+            # Check if this signal was deleted from the channel
+            is_deleted = deleted_status.get(r.signal.telegram_msg_id, False)
+            
             token_results.append({
                 'result': r,
                 'sol_profit': sol_profit,
                 'invested': invested,
                 'returned': returned,
+                'is_deleted': is_deleted,
             })
         
         # Sort by SOL profit (descending - best first)
@@ -1727,7 +1818,8 @@ class NotificationBot:
             f"📈 *Overview*\n"
             f"• Total Signals: `{stats.total_signals}`\n"
             f"• Priced OK: `{stats.successful_fetches}`\n"
-            f"• Rugged: `{stats.rugged_count}` 💀\n\n"
+            f"• Rugged: `{stats.rugged_count}` 💀\n"
+            f"• 🗑️ Deleted by Channel: `{deleted_count}`\n\n"
             f"📊 *Win/Loss*\n"
             f"• {win_emoji} Win Rate: `{win_rate:.1f}%`\n"
             f"• Winners (≥1X): `{stats.winners}`\n"
@@ -1745,6 +1837,7 @@ class NotificationBot:
             r = tr['result']
             sol_profit = tr['sol_profit']
             mult = r.multiplier or 0
+            is_deleted = tr.get('is_deleted', False)
             token_address = r.signal.token_address
             telegram_msg_id = r.signal.telegram_msg_id
             
@@ -1764,8 +1857,15 @@ class NotificationBot:
                 mult_str = f"[{mult:.2f}X]({dex_link})"
             
             profit_emoji = "🟢" if sol_profit >= 0 else "🔴"
-            # Token symbol links to original signal message in the channel
-            line = f"{i}. [${r.signal.token_symbol}]({signal_link}) {emoji} {mult_str} | [G]({gmgn_link}) → {profit_emoji}`{sol_profit:+.3f}` SOL\n"
+            
+            # Format with strikethrough if deleted
+            if is_deleted:
+                # Use strikethrough for deleted signals: ~text~
+                token_name = f"~[${r.signal.token_symbol}]({signal_link})~ 🗑️"
+            else:
+                token_name = f"[${r.signal.token_symbol}]({signal_link})"
+            
+            line = f"{i}. {token_name} {emoji} {mult_str} | [G]({gmgn_link}) → {profit_emoji}`{sol_profit:+.3f}` SOL\n"
             token_lines.append(line)
         
         # Send token list in chunks
