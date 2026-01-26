@@ -22,9 +22,11 @@ from typing import Any, AsyncIterator, Optional, TYPE_CHECKING
 from telethon import TelegramClient, events
 from telethon.tl.types import Message, Channel
 
-from src.config import Settings
+from src.config import Settings, MonitoredChannelConfig
 from src.constants import (
     TRENCHES_CHANNEL_NAME,
+    CHANNEL_VOLSM,
+    CHANNEL_MAIN,
 )
 from src.exceptions import (
     ChannelNotFoundError,
@@ -35,7 +37,7 @@ from src.exceptions import (
     TradingDisabledError,
 )
 from src.models import BuySignal, Position, PositionStatus, ProfitAlert
-from src.parsers import MessageParser
+from src.parsers import MessageParser, ParserRegistry, get_registry
 from src.risk_manager import (
     RiskManager,
     RiskConfig,
@@ -80,11 +82,14 @@ class TradingBot:
         self._settings = settings
         self._client: Optional[TelegramClient] = None
         self._trader: Optional[GMGNTrader] = None
-        self._channel_entity: Optional[Channel] = None
+        self._channel_entity: Optional[Channel] = None  # Primary channel (backward compat)
+        self._channel_entities: dict[str, Channel] = {}  # Multi-channel: channel_id -> entity
+        self._monitored_configs: dict[int, MonitoredChannelConfig] = {}  # telegram_id -> config
         self._state: Optional[TradingState] = None
         self._notification_bot: Optional["NotificationBot"] = None
         self._risk_manager: Optional[RiskManager] = None
-        self._parser = MessageParser()
+        self._parser_registry = get_registry()  # Multi-channel parser support
+        self._parser = MessageParser()  # Default parser (backward compat)
         self._running = False
         self._shutdown_event = asyncio.Event()
         self._start_time: Optional[datetime] = None
@@ -218,17 +223,60 @@ class TradingBot:
         await self._trader.initialize()
     
     async def _init_channel(self) -> None:
-        """Initialize channel entity."""
+        """Initialize channel entities for all monitored channels."""
         if not self._client:
             raise RuntimeError("Telegram client not initialized")
         
-        try:
-            self._channel_entity = await self._client.get_entity(
-                self._settings.signal_channel
-            )
-            logger.info(f"✅ Monitoring channel: {self._channel_entity.title}")
-        except Exception as e:
-            raise ChannelNotFoundError(self._settings.signal_channel) from e
+        # Get monitored channel configs from settings
+        monitored_channels = self._settings.channels.monitored_channels
+        
+        if not monitored_channels:
+            # Fallback to legacy single-channel mode
+            try:
+                self._channel_entity = await self._client.get_entity(
+                    self._settings.signal_channel
+                )
+                logger.info(f"✅ Monitoring channel: {self._channel_entity.title}")
+            except Exception as e:
+                raise ChannelNotFoundError(self._settings.signal_channel) from e
+            return
+        
+        # Multi-channel mode
+        for config in monitored_channels:
+            if not config.enabled:
+                logger.info(f"Channel {config.display_name} is disabled, skipping")
+                continue
+            
+            try:
+                # Resolve channel entity
+                channel_ref = config.username or config.channel_id
+                if not channel_ref:
+                    logger.warning(f"Channel {config.display_name} has no username or ID, skipping")
+                    continue
+                
+                entity = await self._client.get_entity(channel_ref)
+                
+                # Store in multi-channel structures
+                self._channel_entities[config.channel_id] = entity
+                self._monitored_configs[entity.id] = config
+                
+                # First enabled channel becomes primary (backward compat)
+                if self._channel_entity is None:
+                    self._channel_entity = entity
+                
+                trading_status = "📈 trading" if config.trading_enabled else "👁️ monitor-only"
+                mirror_status = "📡 mirroring" if config.commercial_mirroring else ""
+                logger.info(
+                    f"✅ Monitoring [{config.channel_id}]: {entity.title} ({trading_status}) {mirror_status}"
+                )
+                
+            except Exception as e:
+                logger.error(f"Failed to get entity for channel {config.display_name}: {e}")
+                # Continue with other channels
+                continue
+        
+        if not self._channel_entities:
+            raise ChannelNotFoundError("No channels could be resolved")
     
     async def _init_notification_bot(self) -> None:
         """Initialize Telegram notification bot for remote management."""
@@ -366,11 +414,21 @@ class TradingBot:
         
         self._print_startup_banner()
         
-        # Register event handler
-        self._client.add_event_handler(
-            self._on_new_message,
-            events.NewMessage(chats=[self._channel_entity])
-        )
+        # Register event handlers for all monitored channels
+        if self._channel_entities:
+            # Multi-channel mode: listen to all channels
+            channel_list = list(self._channel_entities.values())
+            self._client.add_event_handler(
+                self._on_new_message,
+                events.NewMessage(chats=channel_list)
+            )
+            logger.info(f"Listening to {len(channel_list)} channels")
+        else:
+            # Legacy single-channel mode
+            self._client.add_event_handler(
+                self._on_new_message,
+                events.NewMessage(chats=[self._channel_entity])
+            )
         
         # Setup signal handlers for graceful shutdown
         self._setup_signal_handlers()
@@ -393,7 +451,17 @@ class TradingBot:
         print("=" * 62)
         print("║" + " " * 14 + "SOLANA AUTO TRADING BOT" + " " * 23 + "║")
         print("=" * 62)
-        print(f"  Channel:        {TRENCHES_CHANNEL_NAME}")
+        
+        # Show monitored channels
+        if self._channel_entities:
+            print("  Channels:")
+            for channel_id, entity in self._channel_entities.items():
+                config = self._monitored_configs.get(entity.id)
+                status = "📈" if config and config.trading_enabled else "👁️"
+                print(f"    {status} [{channel_id}] {entity.title}")
+        else:
+            print(f"  Channel:        {TRENCHES_CHANNEL_NAME}")
+        
         print(f"  Buy Amount:     {trading.buy_amount_sol} SOL")
         print(f"  Sell At:        {trading.min_multiplier_to_sell}X ({trading.sell_percentage}%)")
         print(f"  Max Positions:  {trading.max_open_positions}")
@@ -424,10 +492,11 @@ class TradingBot:
     
     async def _on_new_message(self, event: events.NewMessage.Event) -> None:
         """
-        Handle new messages from the channel (LIVE MODE).
+        Handle new messages from monitored channels (LIVE MODE).
         
         This is the production-grade event-based listener pattern.
         Messages are processed as they arrive in real-time.
+        Supports multiple channels with channel-specific parsing.
         
         Args:
             event: Telethon new message event
@@ -439,23 +508,33 @@ class TradingBot:
         
         self._messages_processed += 1
         
+        # Determine which channel this message is from
+        telegram_channel_id = message.peer_id.channel_id if hasattr(message.peer_id, 'channel_id') else None
+        
+        # Get channel config for this source
+        channel_config = self._monitored_configs.get(telegram_channel_id)
+        logical_channel_id = channel_config.channel_id if channel_config else CHANNEL_VOLSM
+        
+        # Get channel-specific parser
+        parser = MessageParser(channel_id=logical_channel_id)
+        
         # Get message metadata for database storage
         msg_time = message.date.replace(tzinfo=timezone.utc) if message.date.tzinfo is None else message.date
-        channel_id = self._channel_entity.id if self._channel_entity else None
         
         # Get reply information
         reply_to_msg_id = message.reply_to_msg_id if message.reply_to else None
         
-        # Parse message
-        result = self._parser.parse(
+        # Parse message using channel-specific parser
+        result = parser.parse(
             message_id=message.id,
             text=message.text,
             reply_to_msg_id=reply_to_msg_id,
         )
         
-        # === MIRROR ALL MESSAGES TO PREMIUM CHANNEL ===
-        # This mirrors EVERY message from Trenches to Premium (like SolSleuth Premium)
-        if self._notification_bot and self._notification_bot._commercial:
+        # === MIRROR MESSAGES TO PREMIUM CHANNEL ===
+        # Only mirror from channels with commercial_mirroring enabled (default: VOLSM only)
+        should_mirror = channel_config.commercial_mirroring if channel_config else True
+        if should_mirror and self._notification_bot and self._notification_bot._commercial:
             try:
                 is_signal = result.buy_signal is not None
                 await self._notification_bot._commercial.mirror_message(
@@ -470,20 +549,32 @@ class TradingBot:
             except Exception as e:
                 logger.error(f"Failed to mirror message to Premium: {e}")
         
-        # Handle buy signal
+        # Handle buy signal (only if trading enabled for this channel)
         if result.buy_signal:
-            await self._handle_buy_signal(result.buy_signal)
+            trading_enabled = channel_config.trading_enabled if channel_config else True
+            await self._handle_buy_signal(
+                result.buy_signal,
+                channel_id=logical_channel_id,
+                trading_enabled=trading_enabled,
+            )
         
         # Handle profit alert
         if result.profit_alert:
-            await self._handle_profit_alert(result.profit_alert)
+            await self._handle_profit_alert(result.profit_alert, channel_id=logical_channel_id)
     
-    async def _handle_buy_signal(self, signal: BuySignal) -> None:
+    async def _handle_buy_signal(
+        self,
+        signal: BuySignal,
+        channel_id: str = CHANNEL_VOLSM,
+        trading_enabled: bool = True,
+    ) -> None:
         """
         Handle a buy signal.
 
         Args:
             signal: Parsed buy signal
+            channel_id: Logical channel identifier (e.g., 'volsm', 'main')
+            trading_enabled: Whether trading is enabled for this channel
         """
         # Use notification bot settings if available, otherwise use static settings
         if self._notification_bot:
@@ -500,7 +591,7 @@ class TradingBot:
         trading = self._settings.trading
 
         logger.info(
-            f"📨 Buy signal: ${signal.token_symbol} "
+            f"📨 [{channel_id.upper()}] Buy signal: ${signal.token_symbol} "
             f"({signal.token_address[:12]}...)"
         )
 
@@ -514,7 +605,7 @@ class TradingBot:
                 token_address=signal.token_address,
                 signal_type="BUY",
             )
-            # Record signal to database (live mode - updates cursor automatically)
+            # Record signal to database with channel info
             await self._notification_bot.record_signal(
                 token_address=signal.token_address,
                 token_symbol=signal.token_symbol,
@@ -522,7 +613,13 @@ class TradingBot:
                 signal_time=signal.timestamp,
                 raw_text=signal.raw_text,
                 channel_id=self._channel_entity.id if self._channel_entity else None,
+                channel_name=channel_id,  # Logical channel name
             )
+
+        # Check if trading is enabled for this channel
+        if not trading_enabled:
+            logger.info(f"[{channel_id.upper()}] Trading disabled for this channel, signal recorded only")
+            return
 
         # Check if wallet is configured
         if not wallet_configured:
@@ -537,6 +634,7 @@ class TradingBot:
         # Check if trading is enabled
         if not trading.enabled:
             logger.info("Trading disabled, skipping")
+            return
             return
 
         # === RISK MANAGEMENT CHECKS ===
@@ -641,12 +739,17 @@ class TradingBot:
             except (DuplicatePositionError, MaxPositionsReachedError) as e:
                 logger.warning(f"Could not add position: {e}")
     
-    async def _handle_profit_alert(self, alert: ProfitAlert) -> None:
+    async def _handle_profit_alert(
+        self,
+        alert: ProfitAlert,
+        channel_id: str = CHANNEL_VOLSM,
+    ) -> None:
         """
         Handle a profit alert (potential sell signal).
 
         Args:
             alert: Parsed profit alert
+            channel_id: Logical channel identifier (e.g., 'volsm', 'main')
         """
         # Use notification bot settings if available
         if self._notification_bot:
@@ -659,7 +762,7 @@ class TradingBot:
             trading_paused = False
 
         logger.info(
-            f"📨 Profit alert: {alert.multiplier}X "
+            f"📨 [{channel_id.upper()}] Profit alert: {alert.multiplier}X "
             f"(reply to msg {alert.reply_to_msg_id})"
         )
 
@@ -685,6 +788,7 @@ class TradingBot:
                 alert_time=alert.timestamp if hasattr(alert, 'timestamp') else None,
                 raw_text=alert.raw_text if hasattr(alert, 'raw_text') else None,
                 channel_id=self._channel_entity.id if self._channel_entity else None,
+                channel_name=channel_id,  # Logical channel name
             )
 
         # Find position

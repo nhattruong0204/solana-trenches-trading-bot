@@ -55,6 +55,7 @@ ENV PATH="/opt/venv/bin:$PATH"
 # Copy application code
 COPY --chown=botuser:botuser src/ ./src/
 COPY --chown=botuser:botuser main.py .
+COPY --chown=botuser:botuser main_tracker.py .
 COPY --chown=botuser:botuser pyproject.toml .
 
 # Create data directory for state/logs

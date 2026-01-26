@@ -109,6 +109,80 @@ services:
       - no-new-privileges:true
     read_only: false
 
+  # MAIN Channel Signal Tracker Bot (separate bot, same database)
+  main-tracker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: production
+    
+    container_name: main-tracker-bot
+    restart: unless-stopped
+    
+    # Wait for postgres to be ready
+    depends_on:
+      postgres:
+        condition: service_healthy
+    
+    # Mount volumes for persistence (shares data directory with trading-bot)
+    volumes:
+      - ./data:/app/data
+    
+    # Environment file (same as trading-bot)
+    env_file:
+      - .env
+    
+    # Environment variables for MAIN tracker
+    environment:
+      # Use dedicated session file for main-tracker to avoid SQLite locking conflicts
+      # IMPORTANT: Do NOT use the same session file as trading-bot
+      - MAIN_SESSION_FILE=/app/data/main_tracker.session
+      - SESSION_FILE=/app/data/main_tracker.session
+      - MAIN_LOG_FILE=/app/data/main_tracker.log
+      # Database connection - uses same PostgreSQL
+      - POSTGRES_HOST=postgres
+      - POSTGRES_PORT=5432
+      - POSTGRES_USER=postgres
+      - POSTGRES_DATABASE=wallet_tracker
+    
+    # Override entrypoint for MAIN tracker (not the trading bot)
+    entrypoint: ["python", "-u", "main_tracker.py"]
+    command: []
+    
+    # Resource limits (smaller footprint than trading bot)
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 256M
+        reservations:
+          cpus: '0.1'
+          memory: 64M
+    
+    # Logging configuration
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    
+    # Network configuration
+    networks:
+      - trading-network
+    
+    # Health check
+    healthcheck:
+      test: ["CMD", "python", "-c", "import sys; sys.exit(0)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    
+    # Security options
+    security_opt:
+      - no-new-privileges:true
+    read_only: false
+
 networks:
   trading-network:
     driver: bridge

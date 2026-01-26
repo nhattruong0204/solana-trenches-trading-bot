@@ -1,0 +1,223 @@
+truong@DESKTOP-OAC18E6:~/sol_wallet_tracker/solana-trenches-trading-bot$  ssh -i ~/.ssh/lightnode_vps root@38.54.15.53 "cd /opt/solana-trading-bot && docker compose build main-tracker && docker compose up -d main-tracker && sleep 15 && docker compose logs --tail=50 main-tracker"
+#1 [main-tracker internal] load build definition from Dockerfile
+#1 transferring dockerfile: 2.28kB done
+#1 DONE 0.0s
+
+#2 [main-tracker internal] load .dockerignore
+#2 transferring context: 732B done
+#2 DONE 0.0s
+
+#3 [main-tracker internal] load metadata for docker.io/library/python:3.11-slim
+#3 DONE 0.9s
+
+#4 [main-tracker builder 1/6] FROM docker.io/library/python:3.11-slim@sha256:5be45dbade29bebd6886af6b438fd7e0b4eb7b611f39ba62b430263f82de36d2
+#4 DONE 0.0s
+
+#5 [main-tracker internal] load build context
+#5 transferring context: 44.80kB done
+#5 DONE 0.0s
+
+#6 [main-tracker builder 5/6] COPY requirements.txt .
+#6 CACHED
+
+#7 [main-tracker builder 3/6] RUN apt-get update &&     apt-get install -y --no-install-recommends gcc &&     rm -rf /var/lib/apt/lists/*
+#7 CACHED
+
+#8 [main-tracker builder 6/6] RUN pip install --no-cache-dir --upgrade pip &&     pip install --no-cache-dir -r requirements.txt
+#8 CACHED
+
+#9 [main-tracker builder 4/6] RUN python -m venv /opt/venv
+#9 CACHED
+
+#10 [main-tracker production 3/9] WORKDIR /app
+#10 CACHED
+
+#11 [main-tracker builder 2/6] WORKDIR /build
+#11 CACHED
+
+#12 [main-tracker production 2/9] RUN groupadd --gid 1000 botuser &&     useradd --uid 1000 --gid 1000 --shell /bin/bash --create-home botuser
+#12 CACHED
+
+#13 [main-tracker production 4/9] COPY --from=builder /opt/venv /opt/venv
+#13 CACHED
+
+#14 [main-tracker production 5/9] COPY --chown=botuser:botuser src/ ./src/
+#14 DONE 0.0s
+
+#15 [main-tracker production 6/9] COPY --chown=botuser:botuser main.py .
+#15 DONE 0.0s
+
+#16 [main-tracker production 7/9] COPY --chown=botuser:botuser main_tracker.py .
+#16 DONE 0.0s
+
+#17 [main-tracker production 8/9] COPY --chown=botuser:botuser pyproject.toml .
+#17 DONE 0.0s
+
+#18 [main-tracker production 9/9] RUN mkdir -p /app/data && chown -R botuser:botuser /app/data
+#18 DONE 0.2s
+
+#19 [main-tracker] exporting to image
+#19 exporting layers 0.1s done
+#19 writing image sha256:bd577216c5029fec9ebbf6f3381a9d7fe6d69dab3409e0a13e75ce142762f911 done
+#19 naming to docker.io/library/solana-trading-bot-main-tracker done
+#19 DONE 0.1s
+ Container solana-trading-postgres  Running
+ Container main-tracker-bot  Recreate
+ Container main-tracker-bot  Recreated
+ Container solana-trading-postgres  Waiting
+ Container solana-trading-postgres  Healthy
+ Container main-tracker-bot  Starting
+ Container main-tracker-bot  Started
+main-tracker-bot  |   File "/usr/local/lib/python3.11/asyncio/base_events.py", line 654, in run_until_complete
+main-tracker-bot  |     return future.result()
+main-tracker-bot  |            ^^^^^^^^^^^^^^^
+main-tracker-bot  |   File "/app/main_tracker.py", line 186, in run_tracker
+main-tracker-bot  |     from src.main_tracker_bot import MainTrackerBot
+main-tracker-bot  |   File "/app/src/main_tracker_bot.py", line 34, in <module>
+main-tracker-bot  |     from src.constants import (
+main-tracker-bot  | ImportError: cannot import name 'TRENCHES_TRENCHES_MAIN_CHANNEL_NAME' from 'src.constants' (/app/src/constants.py)
+main-tracker-bot  | Traceback (most recent call last):
+main-tracker-bot  |   File "/app/main_tracker.py", line 291, in <module>
+main-tracker-bot  |     sys.exit(main())
+main-tracker-bot  |              ^^^^^^
+main-tracker-bot  |   File "/app/main_tracker.py", line 284, in main
+main-tracker-bot  |     return asyncio.run(run_tracker(args))
+main-tracker-bot  |            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+main-tracker-bot  |   File "/usr/local/lib/python3.11/asyncio/runners.py", line 190, in run
+main-tracker-bot  |     return runner.run(main)
+main-tracker-bot  |            ^^^^^^^^^^^^^^^^
+main-tracker-bot  |   File "/usr/local/lib/python3.11/asyncio/runners.py", line 118, in run
+main-tracker-bot  |     return self._loop.run_until_complete(task)
+main-tracker-bot  |            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+main-tracker-bot  |   File "/usr/local/lib/python3.11/asyncio/base_events.py", line 654, in run_until_complete
+main-tracker-bot  |     return future.result()
+main-tracker-bot  |            ^^^^^^^^^^^^^^^
+main-tracker-bot  |   File "/app/main_tracker.py", line 186, in run_tracker
+main-tracker-bot  |     from src.main_tracker_bot import MainTrackerBot
+main-tracker-bot  |   File "/app/src/main_tracker_bot.py", line 34, in <module>
+main-tracker-bot  |     from src.constants import (
+main-tracker-bot  | ImportError: cannot import name 'TRENCHES_TRENCHES_MAIN_CHANNEL_NAME' from 'src.constants' (/app/src/constants.py)
+main-tracker-bot  | Traceback (most recent call last):
+main-tracker-bot  |   File "/app/main_tracker.py", line 291, in <module>
+main-tracker-bot  |     sys.exit(main())
+main-tracker-bot  |              ^^^^^^
+main-tracker-bot  |   File "/app/main_tracker.py", line 284, in main
+main-tracker-bot  |     return asyncio.run(run_tracker(args))
+main-tracker-bot  |            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+main-tracker-bot  |   File "/usr/local/lib/python3.11/asyncio/runners.py", line 190, in run
+main-tracker-bot  |     return runner.run(main)
+main-tracker-bot  |            ^^^^^^^^^^^^^^^^
+main-tracker-bot  |   File "/usr/local/lib/python3.11/asyncio/runners.py", line 118, in run
+main-tracker-bot  |     return self._loop.run_until_complete(task)
+main-tracker-bot  |            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+main-tracker-bot  |   File "/usr/local/lib/python3.11/asyncio/base_events.py", line 654, in run_until_complete
+main-tracker-bot  |     return future.result()
+main-tracker-bot  |            ^^^^^^^^^^^^^^^
+main-tracker-bot  |   File "/app/main_tracker.py", line 186, in run_tracker
+main-tracker-bot  |     from src.main_tracker_bot import MainTrackerBot
+main-tracker-bot  |   File "/app/src/main_tracker_bot.py", line 34, in <module>
+main-tracker-bot  |     from src.constants import (
+main-tracker-bot  | ImportError: cannot import name 'TRENCHES_TRENCHES_MAIN_CHANNEL_NAME' from 'src.constants' (/app/src/constants.py)
+truong@DESKTOP-OAC18E6:~/sol_wallet_tracker/solana-trenches-trading-bot$  cd /home/truong/sol_wallet_tracker/solana-trenches-trading-bot && sed -i 's/TRENCHES_TRENCHES_/TRENCHES_/g' src/main_tracker_bot.py
+truong@DESKTOP-OAC18E6:~/sol_wallet_tracker/solana-trenches-trading-bot$  rsync -avz -e "ssh -i ~/.ssh/lightnode_vps" /home/truong/sol_wallet_tracker/solana-trenches-trading-bot/src/main_tracker_bot.py root@38.54.15.53:/opt/solana-trading-bot/src/ && ssh -i ~/.ssh/lightnode_vps root@38.54.15.53 "cd /opt/solana-trading-bot && docker compose build main-tracker && docker compose up -d main-tracker"
+sending incremental file list
+main_tracker_bot.py
+
+sent 492 bytes  received 413 bytes  1,810.00 bytes/sec
+total size is 43,526  speedup is 48.10
+#1 [main-tracker internal] load build definition from Dockerfile
+#1 transferring dockerfile: 2.28kB done
+#1 DONE 0.0s
+
+#2 [main-tracker internal] load .dockerignore
+#2 transferring context: 732B done
+#2 DONE 0.0s
+
+#3 [main-tracker internal] load metadata for docker.io/library/python:3.11-slim
+#3 DONE 2.6s
+
+#4 [main-tracker builder 1/6] FROM docker.io/library/python:3.11-slim@sha256:5be45dbade29bebd6886af6b438fd7e0b4eb7b611f39ba62b430263f82de36d2
+#4 DONE 0.0s
+
+#5 [main-tracker internal] load build context
+#5 transferring context: 44.79kB done
+#5 DONE 0.0s
+
+#6 [main-tracker builder 6/6] RUN pip install --no-cache-dir --upgrade pip &&     pip install --no-cache-dir -r requirements.txt
+#6 CACHED
+
+#7 [main-tracker builder 5/6] COPY requirements.txt .
+#7 CACHED
+
+#8 [main-tracker builder 2/6] WORKDIR /build
+#8 CACHED
+
+#9 [main-tracker builder 4/6] RUN python -m venv /opt/venv
+#9 CACHED
+
+#10 [main-tracker builder 3/6] RUN apt-get update &&     apt-get install -y --no-install-recommends gcc &&     rm -rf /var/lib/apt/lists/*
+#10 CACHED
+
+#11 [main-tracker production 2/9] RUN groupadd --gid 1000 botuser &&     useradd --uid 1000 --gid 1000 --shell /bin/bash --create-home botuser
+#11 CACHED
+
+#12 [main-tracker production 3/9] WORKDIR /app
+#12 CACHED
+
+#13 [main-tracker production 4/9] COPY --from=builder /opt/venv /opt/venv
+#13 CACHED
+
+#14 [main-tracker production 5/9] COPY --chown=botuser:botuser src/ ./src/
+#14 DONE 0.0s
+
+#15 [main-tracker production 6/9] COPY --chown=botuser:botuser main.py .
+#15 DONE 0.0s
+
+#16 [main-tracker production 7/9] COPY --chown=botuser:botuser main_tracker.py .
+#16 DONE 0.0s
+
+#17 [main-tracker production 8/9] COPY --chown=botuser:botuser pyproject.toml .
+#17 DONE 0.0s
+
+#18 [main-tracker production 9/9] RUN mkdir -p /app/data && chown -R botuser:botuser /app/data
+#18 DONE 0.2s
+
+#19 [main-tracker] exporting to image
+#19 exporting layers 0.1s done
+#19 writing image sha256:25b526c5458d71a3b0047a60b6946e57b0aa53ad8223a1ffbc12e55c596406f2
+#19 writing image sha256:25b526c5458d71a3b0047a60b6946e57b0aa53ad8223a1ffbc12e55c596406f2 done
+#19 naming to docker.io/library/solana-trading-bot-main-tracker done
+#19 DONE 0.1s
+ Container solana-trading-postgres  Running
+ Container main-tracker-bot  Recreate
+ Container main-tracker-bot  Recreated
+ Container solana-trading-postgres  Waiting
+ Container solana-trading-postgres  Healthy
+ Container main-tracker-bot  Starting
+ Container main-tracker-bot  Started
+truong@DESKTOP-OAC18E6:~/sol_wallet_tracker/solana-trenches-trading-bot$  ssh -i ~/.ssh/lightnode_vps root@38.54.15.53 "cd /opt/solana-trading-bot && sleep 15 && docker compose logs --tail=50 main-tracker"
+main-tracker-bot  | 2026-01-26 16:53:48 | INFO     | __main__ | Starting MAIN Channel Tracker Bot...
+main-tracker-bot  | 2026-01-26 16:53:48 | INFO     | __main__ | Bot token: ...Hl1Bts
+main-tracker-bot  | 2026-01-26 16:53:48 | INFO     | __main__ | Admin user ID: 1846478619
+main-tracker-bot  | 2026-01-26 16:53:48 | INFO     | __main__ | ✅ User client connected (for channel access)
+main-tracker-bot  | 2026-01-26 16:53:48 | INFO     | src.signal_database | Connected to signal database
+main-tracker-bot  | 2026-01-26 16:53:48 | INFO     | src.main_tracker_bot | ✅ Connected to signal database (MAIN channel)
+main-tracker-bot  | 2026-01-26 16:53:54 | INFO     | src.main_tracker_bot | ✅ MAIN Tracker Bot started as @solsleuth_main_ftt_bot
+main-tracker-bot  | 
+main-tracker-bot  | 
+main-tracker-bot  | ============================================================
+main-tracker-bot  | 🔔 MAIN CHANNEL SIGNAL TRACKER
+main-tracker-bot  | ============================================================
+main-tracker-bot  | Channel: @fttrenches_sol (MAIN)
+main-tracker-bot  | Admin:   1846478619
+main-tracker-bot  | ============================================================
+main-tracker-bot  | 
+main-tracker-bot  | 
+main-tracker-bot  | Bot is running. Press Ctrl+C to stop.
+main-tracker-bot  | 
+main-tracker-bot  | 
+truong@DESKTOP-OAC18E6:~/sol_wallet_tracker/solana-trenches-trading-bot$  ssh -i ~/.ssh/lightnode_vps root@38.54.15.53 "cd /opt/solana-trading-bot && docker compose ps"
+NAME                      IMAGE                             COMMAND                  SERVICE             CREATED             STATUS                             PORTS
+main-tracker-bot          solana-trading-bot-main-tracker   "python -u main_trac…"   main-tracker        29 seconds ago      Up 28 seconds (health: starting)   
+solana-trading-bot        solana-trading-bot-trading-bot    "python -u main.py"      trading-bot         48 minutes ago      Up 23 minutes (healthy)            
+solana-trading-postgres   postgres:16-alpine                "docker-entrypoint.s…"   postgres            2 hours ago         Up 2 hours (healthy)               5432/tcp
