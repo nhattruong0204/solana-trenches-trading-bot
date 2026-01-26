@@ -217,7 +217,63 @@ class CommercialBot:
             await self._hit_rate_tracker.save()
 
     # =========================================================================
-    # Signal Broadcasting (AstroX-style)
+    # Message Mirroring (ALL messages from Trenches -> Premium)
+    # =========================================================================
+
+    async def mirror_message(
+        self,
+        source_msg_id: int,
+        raw_message: str,
+        reply_to_source_id: Optional[int] = None,
+        is_signal: bool = False,
+        token_symbol: str = "",
+        token_address: str = "",
+        entry_fdv: Optional[float] = None,
+    ) -> Optional[int]:
+        """
+        Mirror ANY message from Trenches to Premium channel exactly.
+
+        This forwards ALL messages (not just signals) to create a full mirror.
+        
+        Args:
+            source_msg_id: Original message ID in Trenches channel
+            raw_message: Original message text (forwarded as-is)
+            reply_to_source_id: If this is a reply, the source msg ID it replies to
+            is_signal: Whether this is an ape signal (for tracking)
+            token_symbol: Token symbol if it's a signal
+            token_address: Token address if it's a signal
+            entry_fdv: Entry FDV if it's a signal
+
+        Returns:
+            Message ID in premium channel, or None if failed
+        """
+        if not self._signal_publisher:
+            return None
+
+        premium_msg_id = await self._signal_publisher.mirror_message(
+            source_msg_id=source_msg_id,
+            raw_message=raw_message,
+            reply_to_source_id=reply_to_source_id,
+            is_signal=is_signal,
+            token_symbol=token_symbol,
+            token_address=token_address,
+            entry_fdv=entry_fdv,
+        )
+
+        # Record in hit rate tracker if it's a signal
+        if self._hit_rate_tracker and premium_msg_id and is_signal:
+            signal_id = str(source_msg_id)
+            self._hit_rate_tracker.record_signal(
+                signal_id=signal_id,
+                token_symbol=token_symbol,
+                token_address=token_address,
+                entry_fdv=entry_fdv,
+            )
+
+        return premium_msg_id
+
+    # =========================================================================
+    # Signal Broadcasting (AstroX-style - Legacy)
     # =========================================================================
 
     async def forward_ape_signal(
@@ -230,7 +286,8 @@ class CommercialBot:
         """
         Forward an ape signal from Trenches to Premium channel.
 
-        This mirrors the signal to the premium channel immediately.
+        NOTE: This is the legacy method that reformats the signal.
+        For full mirroring, use mirror_message() instead.
 
         Args:
             source_msg_id: Original message ID in Trenches channel
@@ -268,21 +325,24 @@ class CommercialBot:
         source_msg_id: int,
         multiplier: float,
         current_fdv: Optional[float] = None,
+        profit_alert_raw: str = "",
     ) -> bool:
         """
-        Send a profit UPDATE message as a reply to the original ape signal.
+        Handle a profit alert and forward winners to Public channel.
 
-        This is called when a signal hits a new milestone (2X, 3X, etc.)
-        The update is sent as a reply in the premium channel, and on
-        first 2X+ hit, also forwards to public channel.
+        NOTE: With mirroring enabled, profit alerts are already sent to Premium
+        channel as raw messages. This method only:
+        1. Tracks the multiplier milestone
+        2. Forwards to Public channel when 2X+ is hit
 
         Args:
-            source_msg_id: Original message ID in Trenches channel
+            source_msg_id: Original SIGNAL message ID in Trenches channel
             multiplier: Current multiplier (e.g., 2.5 for 2.5X)
             current_fdv: Current FDV
+            profit_alert_raw: Raw profit alert message text for public forwarding
 
         Returns:
-            True if update was sent successfully
+            True if processed successfully
         """
         if not self._signal_publisher:
             return False
@@ -291,6 +351,7 @@ class CommercialBot:
             source_msg_id=source_msg_id,
             multiplier=multiplier,
             current_fdv=current_fdv,
+            profit_alert_raw=profit_alert_raw,
         )
 
         # Update hit rate tracker

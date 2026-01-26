@@ -29,9 +29,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Helps track how many signals were removed (potential rugs/scams)
   - Location: `src/notification_bot.py:280-340` (new method), lines 1455-1460, 1610-1618 (signalpnl), 
     lines 1700-1705, 1865-1873 (realpnl)
+- **Commercial Channel Mirroring (SolSleuth Premium & Signals)**
+  - Premium channel (SolSleuth Premium) now mirrors ALL messages from source channel exactly
+  - New `mirror_message()` method in `SignalPublisher` and `CommercialBot` for raw message forwarding
+  - Public channel (SolSleuth Signals) forwards winning signals (2X+) with original message + CTA
+  - Profit alerts are tracked and trigger Public channel forwarding on first 2X+ milestone
+  - `SignalMapping` dataclass now stores `raw_message` for accurate public channel forwarding
+  - Location: `src/signal_publisher.py:220-300` (mirror_message), `src/commercial_bot.py:222-275`,
+    `src/bot.py:454-470` (mirroring in message handler)
 
 ### Changed
-<!-- Changes to existing functionality -->
+- Updated `_on_new_message()` in `bot.py` to mirror ALL messages to Premium channel (not just parsed signals)
+- `send_profit_update()` now only tracks milestones and triggers Public channel forwarding (Premium already mirrored)
+- `_forward_win_to_public()` now uses raw messages when available, with CTA appended separately
 
 ### Fixed
 - `/syncsignals` and `/bootstrap` commands failing with "Cannot send requests while disconnected"

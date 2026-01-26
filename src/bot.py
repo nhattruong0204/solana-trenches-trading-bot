@@ -453,6 +453,23 @@ class TradingBot:
             reply_to_msg_id=reply_to_msg_id,
         )
         
+        # === MIRROR ALL MESSAGES TO PREMIUM CHANNEL ===
+        # This mirrors EVERY message from Trenches to Premium (like SolSleuth Premium)
+        if self._notification_bot and self._notification_bot._commercial:
+            try:
+                is_signal = result.buy_signal is not None
+                await self._notification_bot._commercial.mirror_message(
+                    source_msg_id=message.id,
+                    raw_message=message.text,
+                    reply_to_source_id=reply_to_msg_id,
+                    is_signal=is_signal,
+                    token_symbol=result.buy_signal.token_symbol if result.buy_signal else "",
+                    token_address=result.buy_signal.token_address if result.buy_signal else "",
+                    entry_fdv=result.buy_signal.market_cap if result.buy_signal else None,
+                )
+            except Exception as e:
+                logger.error(f"Failed to mirror message to Premium: {e}")
+        
         # Handle buy signal
         if result.buy_signal:
             await self._handle_buy_signal(result.buy_signal)
@@ -487,17 +504,8 @@ class TradingBot:
             f"({signal.token_address[:12]}...)"
         )
 
-        # Forward ape signal to Premium channel (AstroX-style)
-        if self._notification_bot and self._notification_bot._commercial:
-            try:
-                await self._notification_bot._commercial.forward_ape_signal(
-                    source_msg_id=signal.message_id,
-                    token_symbol=signal.token_symbol,
-                    token_address=signal.token_address,
-                    entry_fdv=signal.market_cap,  # Use market cap as entry FDV
-                )
-            except Exception as e:
-                logger.error(f"Failed to forward ape signal: {e}")
+        # NOTE: Ape signal is already mirrored in _on_new_message via mirror_message()
+        # The signal is recorded with is_signal=True for hit rate tracking
 
         # Notify about the signal and record for PnL tracking (LIVE MODE)
         if self._notification_bot:
@@ -655,16 +663,18 @@ class TradingBot:
             f"(reply to msg {alert.reply_to_msg_id})"
         )
 
-        # Send profit UPDATE to Premium channel (AstroX-style reply to original)
+        # Handle profit update for Public channel forwarding (winners)
+        # NOTE: The raw profit alert is already mirrored to Premium in _on_new_message
         if self._notification_bot and self._notification_bot._commercial:
             try:
                 await self._notification_bot._commercial.send_profit_update(
                     source_msg_id=alert.reply_to_msg_id,
                     multiplier=alert.multiplier,
                     current_fdv=alert.market_cap if hasattr(alert, 'market_cap') else None,
+                    profit_alert_raw=alert.raw_text if hasattr(alert, 'raw_text') else "",
                 )
             except Exception as e:
-                logger.error(f"Failed to send profit update: {e}")
+                logger.error(f"Failed to process profit update: {e}")
 
         # Record profit alert to database (LIVE MODE)
         if self._notification_bot:

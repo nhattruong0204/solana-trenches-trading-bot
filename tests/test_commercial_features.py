@@ -15,9 +15,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 from src.signal_publisher import (
     SignalPublisher,
     BroadcastConfig,
-    BroadcastSignal,
-    SignalTier,
-    HitRateStats,
+    SignalMapping,
 )
 from src.subscription_manager import (
     SubscriptionManager,
@@ -46,86 +44,48 @@ from src.kol_tracker import (
 # Signal Publisher Tests
 # ==============================================================================
 
-class TestBroadcastSignal:
-    """Tests for BroadcastSignal dataclass."""
+class TestSignalMapping:
+    """Tests for SignalMapping dataclass."""
 
-    def test_tier_2x(self):
-        """Test 2X tier classification."""
-        signal = BroadcastSignal(
+    def test_signal_mapping_creation(self):
+        """Test SignalMapping can be created with required fields."""
+        mapping = SignalMapping(
+            source_msg_id=123,
+            premium_msg_id=456,
             token_symbol="TEST",
             token_address="abc123",
-            entry_time=datetime.now(timezone.utc),
-            alert_time=datetime.now(timezone.utc),
-            multiplier=2.0,
         )
-        assert signal.tier == SignalTier.TIER_2X
+        assert mapping.source_msg_id == 123
+        assert mapping.premium_msg_id == 456
+        assert mapping.token_symbol == "TEST"
+        assert mapping.forwarded_to_public is False
 
-    def test_tier_5x(self):
-        """Test 5X tier classification."""
-        signal = BroadcastSignal(
+    def test_signal_mapping_to_dict(self):
+        """Test SignalMapping serialization."""
+        mapping = SignalMapping(
+            source_msg_id=123,
+            premium_msg_id=456,
             token_symbol="TEST",
             token_address="abc123",
-            entry_time=datetime.now(timezone.utc),
-            alert_time=datetime.now(timezone.utc),
-            multiplier=5.0,
+            current_multiplier=2.5,
         )
-        assert signal.tier == SignalTier.TIER_5X
+        data = mapping.to_dict()
+        assert data["source_msg_id"] == 123
+        assert data["token_symbol"] == "TEST"
+        assert data["current_multiplier"] == 2.5
 
-    def test_tier_10x(self):
-        """Test 10X tier classification."""
-        signal = BroadcastSignal(
-            token_symbol="TEST",
-            token_address="abc123",
-            entry_time=datetime.now(timezone.utc),
-            alert_time=datetime.now(timezone.utc),
-            multiplier=10.0,
-        )
-        assert signal.tier == SignalTier.TIER_10X
-
-    def test_tier_100x(self):
-        """Test 100X tier classification."""
-        signal = BroadcastSignal(
-            token_symbol="TEST",
-            token_address="abc123",
-            entry_time=datetime.now(timezone.utc),
-            alert_time=datetime.now(timezone.utc),
-            multiplier=100.0,
-        )
-        assert signal.tier == SignalTier.TIER_100X
-
-    def test_hold_duration(self):
-        """Test hold duration calculation."""
-        entry = datetime.now(timezone.utc) - timedelta(hours=5)
-        signal = BroadcastSignal(
-            token_symbol="TEST",
-            token_address="abc123",
-            entry_time=entry,
-            alert_time=datetime.now(timezone.utc),
-            multiplier=2.0,
-        )
-        assert 4.9 < signal.hold_duration_hours < 5.1
-
-
-class TestHitRateStats:
-    """Tests for HitRateStats dataclass."""
-
-    def test_hit_rate_calculation(self):
-        """Test hit rate percentage calculation."""
-        stats = HitRateStats(
-            total_signals=100,
-            signals_2x=60,
-            signals_5x=30,
-            signals_10x=10,
-        )
-        assert stats.hit_rate_2x == 60.0
-        assert stats.hit_rate_5x == 30.0
-        assert stats.hit_rate_10x == 10.0
-
-    def test_hit_rate_zero_signals(self):
-        """Test hit rate with zero signals."""
-        stats = HitRateStats(total_signals=0)
-        assert stats.hit_rate_2x == 0.0
-        assert stats.hit_rate_5x == 0.0
+    def test_signal_mapping_from_dict(self):
+        """Test SignalMapping deserialization."""
+        data = {
+            "source_msg_id": 123,
+            "premium_msg_id": 456,
+            "token_symbol": "TEST",
+            "token_address": "abc123",
+            "entry_time": "2024-01-01T00:00:00+00:00",
+        }
+        mapping = SignalMapping.from_dict(data)
+        assert mapping.source_msg_id == 123
+        assert mapping.token_symbol == "TEST"
 
 
 # ==============================================================================
