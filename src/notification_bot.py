@@ -1443,6 +1443,12 @@ class NotificationBot:
             )
             return
         
+        # Check for deleted messages in the channel
+        await self._send_to_admin(f"🔍 Checking for deleted signals...")
+        message_ids = [s.signal.telegram_msg_id for s in signals]
+        deleted_status = await self._check_deleted_messages(message_ids)
+        deleted_count = sum(1 for is_deleted in deleted_status.values() if is_deleted)
+        
         # Calculate SOL profits for each signal
         token_results = []
         total_invested_sol = 0.0
@@ -1477,12 +1483,16 @@ class NotificationBot:
             total_buy_fees += buy_fee
             total_sell_fees += sell_fee
             
+            # Check if this signal was deleted from the channel
+            is_deleted = deleted_status.get(s.signal.telegram_msg_id, False)
+            
             token_results.append({
                 'signal': s,
                 'multiplier': mult,
                 'sol_profit': sol_profit,
                 'invested': invested,
                 'returned': returned,
+                'is_deleted': is_deleted,
             })
         
         # Sort by SOL profit (descending - best first)
@@ -1531,7 +1541,8 @@ class NotificationBot:
             f"📈 *Overview*\n"
             f"• Total Signals: `{total}`\n"
             f"• With Profit Alert: `{len(with_profit)}`\n"
-            f"• No Profit Alert: `{len(losers)}`\n\n"
+            f"• No Profit Alert: `{len(losers)}`\n"
+            f"• 🗑️ Deleted by Channel: `{deleted_count}`\n\n"
             f"📊 *Win/Loss*\n"
             f"• {win_emoji} Win Rate: `{win_rate:.1f}%`\n"
             f"• Winners: `{len(with_profit)}`\n"
@@ -1564,6 +1575,7 @@ class NotificationBot:
             s = tr['signal']
             sol_profit = tr['sol_profit']
             mult = tr['multiplier']
+            is_deleted = tr.get('is_deleted', False)
             token_address = s.signal.token_address
             telegram_msg_id = s.signal.telegram_msg_id
             is_deleted = deleted_status.get(telegram_msg_id, False)
@@ -1701,6 +1713,12 @@ class NotificationBot:
             )
             return
         
+        # Check for deleted messages in the channel
+        await self._send_to_admin(f"🔍 Checking for deleted signals...")
+        message_ids = [s.telegram_msg_id for s in signals]
+        deleted_status = await self._check_deleted_messages(message_ids)
+        deleted_count = sum(1 for is_deleted in deleted_status.values() if is_deleted)
+        
         # Progress message
         progress_msg = await self._send_to_admin(
             f"🔍 Fetching live prices from DexScreener...\n"
@@ -1759,11 +1777,15 @@ class NotificationBot:
             total_buy_fees += buy_fee
             total_sell_fees += sell_fee
             
+            # Check if this signal was deleted from the channel
+            is_deleted = deleted_status.get(r.signal.telegram_msg_id, False)
+            
             token_results.append({
                 'result': r,
                 'sol_profit': sol_profit,
                 'invested': invested,
                 'returned': returned,
+                'is_deleted': is_deleted,
             })
         
         # Sort by SOL profit (descending - best first)
@@ -1804,7 +1826,8 @@ class NotificationBot:
             f"📈 *Overview*\n"
             f"• Total Signals: `{stats.total_signals}`\n"
             f"• Priced OK: `{stats.successful_fetches}`\n"
-            f"• Rugged: `{stats.rugged_count}` 💀\n\n"
+            f"• Rugged: `{stats.rugged_count}` 💀\n"
+            f"• 🗑️ Deleted by Channel: `{deleted_count}`\n\n"
             f"📊 *Win/Loss*\n"
             f"• {win_emoji} Win Rate: `{win_rate:.1f}%`\n"
             f"• Winners (≥1X): `{stats.winners}`\n"
@@ -1837,6 +1860,7 @@ class NotificationBot:
             r = tr['result']
             sol_profit = tr['sol_profit']
             mult = r.multiplier or 0
+            is_deleted = tr.get('is_deleted', False)
             token_address = r.signal.token_address
             telegram_msg_id = r.signal.telegram_msg_id
             is_deleted = deleted_status.get(telegram_msg_id, False)
@@ -2492,18 +2516,23 @@ class NotificationBot:
         if not self._signal_db:
             await self._send_to_admin("❌ Database not configured")
             return
-        
-        if not self._bot or not self._bot._client:
-            await self._send_to_admin("❌ Trading bot not connected")
+
+        # Ensure trading bot client is connected (reconnect if needed)
+        if not await self._ensure_trading_client_connected():
+            await self._send_to_admin(
+                "❌ *Trading bot not connected*\n\n"
+                "The Telegram client is disconnected and could not be reconnected.\n"
+                "Please restart the bot or check network connectivity."
+            )
             return
-        
+
         try:
             # Ensure channel state table exists (for upgrades)
             await self._signal_db.ensure_channel_state_table()
-            
+
             # Use the trading bot's Telegram client to fetch messages
             client = self._bot._client
-            
+
             # Get the channel entity
             from src.constants import TRENCHES_CHANNEL_NAME
             channel = None
@@ -2659,17 +2688,22 @@ class NotificationBot:
         if not self._signal_db:
             await self._send_to_admin("❌ Database not configured")
             return
-        
-        if not self._bot or not self._bot._client:
-            await self._send_to_admin("❌ Trading bot not connected")
+
+        # Ensure trading bot client is connected (reconnect if needed)
+        if not await self._ensure_trading_client_connected():
+            await self._send_to_admin(
+                "❌ *Trading bot not connected*\n\n"
+                "The Telegram client is disconnected and could not be reconnected.\n"
+                "Please restart the bot or check network connectivity."
+            )
             return
-        
+
         try:
             # Ensure channel state table exists
             await self._signal_db.ensure_channel_state_table()
-            
+
             client = self._bot._client
-            
+
             # Get the channel entity
             from src.constants import TRENCHES_CHANNEL_NAME
             channel = None
