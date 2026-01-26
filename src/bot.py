@@ -262,6 +262,8 @@ class TradingBot:
         )
         
         self._notification_bot.set_trading_bot(self)
+        # Pass the user client for checking deleted messages
+        self._notification_bot.set_user_client(self._client)
         await self._notification_bot.start()
         logger.info("✅ Notification bot started")
 
@@ -485,6 +487,18 @@ class TradingBot:
             f"({signal.token_address[:12]}...)"
         )
 
+        # Forward ape signal to Premium channel (AstroX-style)
+        if self._notification_bot and self._notification_bot._commercial:
+            try:
+                await self._notification_bot._commercial.forward_ape_signal(
+                    source_msg_id=signal.message_id,
+                    token_symbol=signal.token_symbol,
+                    token_address=signal.token_address,
+                    entry_fdv=signal.market_cap,  # Use market cap as entry FDV
+                )
+            except Exception as e:
+                logger.error(f"Failed to forward ape signal: {e}")
+
         # Notify about the signal and record for PnL tracking (LIVE MODE)
         if self._notification_bot:
             await self._notification_bot.notify_signal(
@@ -640,6 +654,17 @@ class TradingBot:
             f"📨 Profit alert: {alert.multiplier}X "
             f"(reply to msg {alert.reply_to_msg_id})"
         )
+
+        # Send profit UPDATE to Premium channel (AstroX-style reply to original)
+        if self._notification_bot and self._notification_bot._commercial:
+            try:
+                await self._notification_bot._commercial.send_profit_update(
+                    source_msg_id=alert.reply_to_msg_id,
+                    multiplier=alert.multiplier,
+                    current_fdv=alert.market_cap if hasattr(alert, 'market_cap') else None,
+                )
+            except Exception as e:
+                logger.error(f"Failed to send profit update: {e}")
 
         # Record profit alert to database (LIVE MODE)
         if self._notification_bot:

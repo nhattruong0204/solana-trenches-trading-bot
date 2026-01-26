@@ -22,6 +22,7 @@ from telethon import TelegramClient, events
 from telethon.sessions import StringSession
 from telethon.tl.types import User, Channel, Chat
 from telethon.tl.custom import Button
+from telethon.errors import MessageIdInvalidError
 
 from src.signal_history import SignalHistory
 from src.signal_database import SignalDatabase
@@ -150,6 +151,11 @@ class NotificationBot:
 
         # Commercial features (premium subscriptions, public broadcasting)
         self._commercial: Optional[CommercialBot] = None
+        
+        # Cache for deleted message status (msg_id -> is_deleted)
+        self._deleted_msg_cache: dict[int, bool] = {}
+        # Telegram client for checking deleted messages (will be set by bot.py)
+        self._user_client: Optional[TelegramClient] = None
     
     def _load_strategy_state(self) -> None:
         """Load strategy enabled state from state file."""
@@ -241,6 +247,86 @@ class NotificationBot:
         """Set the trading bot reference."""
         self._bot = bot
     
+    def set_user_client(self, client: TelegramClient) -> None:
+        """Set the user client for checking deleted messages."""
+        self._user_client = client
+    
+    async def check_deleted_messages(
+        self, 
+        msg_ids: list[int], 
+        progress_callback: Optional[callable] = None
+    ) -> dict[int, bool]:
+        """
+        Check if messages have been deleted from the signal channel.
+        
+        Args:
+            msg_ids: List of Telegram message IDs to check
+            progress_callback: Optional callback for progress updates (current, total)
+            
+        Returns:
+            Dictionary mapping msg_id -> is_deleted (True if deleted)
+        """
+        if not self._user_client:
+            logger.warning("User client not set, cannot check deleted messages")
+            return {msg_id: False for msg_id in msg_ids}
+        
+        # Return cached results for already-checked messages
+        result = {}
+        uncached_ids = []
+        
+        for msg_id in msg_ids:
+            if msg_id in self._deleted_msg_cache:
+                result[msg_id] = self._deleted_msg_cache[msg_id]
+            else:
+                uncached_ids.append(msg_id)
+        
+        if not uncached_ids:
+            return result
+        
+        try:
+            # Get channel entity
+            channel = await self._user_client.get_entity(TRENCHES_CHANNEL_USERNAME)
+            
+            for i, msg_id in enumerate(uncached_ids):
+                try:
+                    # Try to get the message
+                    message = await self._user_client.get_messages(channel, ids=msg_id)
+                    
+                    if message is None:
+                        # Message doesn't exist
+                        is_deleted = True
+                    else:
+                        # Message exists
+                        is_deleted = False
+                    
+                    self._deleted_msg_cache[msg_id] = is_deleted
+                    result[msg_id] = is_deleted
+                    
+                except MessageIdInvalidError:
+                    self._deleted_msg_cache[msg_id] = True
+                    result[msg_id] = True
+                except Exception as e:
+                    logger.debug(f"Error checking msg {msg_id}: {e}")
+                    result[msg_id] = False
+                
+                # Rate limit and progress update
+                if progress_callback and (i + 1) % 5 == 0:
+                    try:
+                        await progress_callback(i + 1, len(uncached_ids))
+                    except Exception:
+                        pass
+                
+                await asyncio.sleep(0.2)  # Rate limit
+                
+        except Exception as e:
+            logger.error(f"Failed to check deleted messages: {e}")
+            # Return False for all uncached to avoid blocking
+            for msg_id in uncached_ids:
+                if msg_id not in result:
+                    result[msg_id] = False
+        
+        return result
+
     @property
     def buy_amount_sol(self) -> float:
         return self._buy_amount_sol
@@ -646,6 +732,7 @@ class NotificationBot:
             "/signalpnl": self._cmd_signal_pnl,
             "/realpnl": self._cmd_real_pnl,
             "/compare": self._cmd_compare,
+            "/checkdeleted": self._cmd_check_deleted,
             "/syncsignals": self._cmd_sync_signals,
             "/bootstrap": self._cmd_bootstrap_signals,
             "/simulate": self._cmd_simulate,
@@ -857,11 +944,13 @@ class NotificationBot:
             "• /realpnl `<days>` - Real-time PnL (live prices)\n"
             "• /realpnl `all` - All-time real-time PnL\n"
             "• /compare `<days>` - Compare signal vs real PnL\n"
-            "• /compare `all` - All-time comparison\n\n"
+            "• /compare `all` - All-time comparison\n"
+            "• /checkdeleted `<limit>` - Check deleted signals\n\n"
             "*Signal Sync:*\n"
             "• /bootstrap - One-time full history sync\n"
             "• /syncsignals - Sync only NEW signals\n\n"
             "_Note: Run /bootstrap once first, then /syncsignals only fetches new messages._\n\n"
+            "_Tip: Deleted signals shown as ~~strikethrough~~ in PnL reports._\n\n"
             "*Control:*\n"
             "• /pause - Pause trading\n"
             "• /resume - Resume trading\n\n"
@@ -1452,6 +1541,21 @@ class NotificationBot:
         # Send header first
         await self._send_to_admin(header_message)
         
+        # Check for deleted messages
+        msg_ids = [tr['signal'].signal.telegram_msg_id for tr in token_results]
+        
+        if self._user_client:
+            await self._send_to_admin("🔍 Checking for deleted messages...")
+            deleted_status = await self.check_deleted_messages(msg_ids)
+            deleted_count = sum(1 for is_del in deleted_status.values() if is_del)
+            if deleted_count > 0:
+                await self._send_to_admin(
+                    f"⚠️ Found `{deleted_count}` deleted signals out of `{len(msg_ids)}`\n"
+                    f"Deleted signals marked with ~~strikethrough~~"
+                )
+        else:
+            deleted_status = {}
+        
         # Build token list in chunks (Telegram limit is ~4096 chars)
         MAX_MESSAGE_LENGTH = 3800
         
@@ -1462,6 +1566,7 @@ class NotificationBot:
             mult = tr['multiplier']
             token_address = s.signal.token_address
             telegram_msg_id = s.signal.telegram_msg_id
+            is_deleted = deleted_status.get(telegram_msg_id, False)
             
             # Build links
             dex_link = f"https://dexscreener.com/solana/{token_address}"
@@ -1485,8 +1590,14 @@ class NotificationBot:
                 mult_str = f"[{mult:.2f}X]({dex_link})"
             
             profit_emoji = "🟢" if sol_profit >= 0 else "🔴"
-            # Token symbol links to original signal message in the channel
-            line = f"{i}. [${s.signal.token_symbol}]({signal_link}) {emoji} {mult_str} | [G]({gmgn_link}) → {profit_emoji}`{sol_profit:+.3f}` SOL\n"
+            
+            # Apply strikethrough for deleted signals
+            if is_deleted:
+                # Use strikethrough markdown for deleted signals
+                line = f"{i}. ~~[${s.signal.token_symbol}]({signal_link})~~ 🗑️ {emoji} {mult_str} | [G]({gmgn_link}) → {profit_emoji}`{sol_profit:+.3f}` SOL\n"
+            else:
+                # Normal display
+                line = f"{i}. [${s.signal.token_symbol}]({signal_link}) {emoji} {mult_str} | [G]({gmgn_link}) → {profit_emoji}`{sol_profit:+.3f}` SOL\n"
             token_lines.append(line)
         
         # Send token list in chunks
@@ -1703,6 +1814,21 @@ class NotificationBot:
         # Send header first
         await self._send_to_admin(header_message)
         
+        # Check for deleted messages
+        msg_ids = [tr['result'].signal.telegram_msg_id for tr in token_results]
+        
+        if self._user_client:
+            await self._send_to_admin("🔍 Checking for deleted messages...")
+            deleted_status = await self.check_deleted_messages(msg_ids)
+            deleted_count = sum(1 for is_del in deleted_status.values() if is_del)
+            if deleted_count > 0:
+                await self._send_to_admin(
+                    f"⚠️ Found `{deleted_count}` deleted signals out of `{len(msg_ids)}`\n"
+                    f"Deleted signals marked with ~~strikethrough~~"
+                )
+        else:
+            deleted_status = {}
+        
         # Build token list in chunks (Telegram limit is ~4096 chars)
         MAX_MESSAGE_LENGTH = 3800  # Leave some buffer
         
@@ -1713,6 +1839,7 @@ class NotificationBot:
             mult = r.multiplier or 0
             token_address = r.signal.token_address
             telegram_msg_id = r.signal.telegram_msg_id
+            is_deleted = deleted_status.get(telegram_msg_id, False)
             
             # Build links
             dex_link = f"https://dexscreener.com/solana/{token_address}"
@@ -1730,8 +1857,12 @@ class NotificationBot:
                 mult_str = f"[{mult:.2f}X]({dex_link})"
             
             profit_emoji = "🟢" if sol_profit >= 0 else "🔴"
-            # Token symbol links to original signal message in the channel
-            line = f"{i}. [${r.signal.token_symbol}]({signal_link}) {emoji} {mult_str} | [G]({gmgn_link}) → {profit_emoji}`{sol_profit:+.3f}` SOL\n"
+            
+            # Apply strikethrough for deleted signals
+            if is_deleted:
+                line = f"{i}. ~~[${r.signal.token_symbol}]({signal_link})~~ 🗑️ {emoji} {mult_str} | [G]({gmgn_link}) → {profit_emoji}`{sol_profit:+.3f}` SOL\n"
+            else:
+                line = f"{i}. [${r.signal.token_symbol}]({signal_link}) {emoji} {mult_str} | [G]({gmgn_link}) → {profit_emoji}`{sol_profit:+.3f}` SOL\n"
             token_lines.append(line)
         
         # Send token list in chunks
@@ -2235,6 +2366,115 @@ class NotificationBot:
             "⚠️ Note: This fetches live prices from DexScreener\n"
             "and may take a while for many signals."
         )
+    
+    async def _cmd_check_deleted(self, args: str) -> None:
+        """
+        Check how many signals have been deleted from the Trenches channel.
+        Usage: /checkdeleted [days] - Default is last 50 signals
+        """
+        # Check if database is available
+        if not self._signal_db:
+            await self._send_to_admin(
+                "❌ *Signal database not configured*\n\n"
+                "Set these environment variables:\n"
+                "• `POSTGRES_HOST`\n"
+                "• `POSTGRES_PORT`\n"
+                "• `POSTGRES_USER`\n"
+                "• `POSTGRES_PASSWORD`\n"
+                "• `POSTGRES_DATABASE`"
+            )
+            return
+        
+        # Check if user client is available
+        if not self._user_client:
+            await self._send_to_admin(
+                "❌ *User client not connected*\n\n"
+                "Cannot check deleted messages without user Telegram session."
+            )
+            return
+        
+        # Parse limit argument
+        limit = 50
+        if args.strip():
+            try:
+                limit = int(args.strip())
+                if limit <= 0 or limit > 500:
+                    await self._send_to_admin(
+                        "❌ *Invalid limit*\n\n"
+                        "Please enter a number between 1 and 500.\n\n"
+                        "Examples: `/checkdeleted 50`, `/checkdeleted 100`"
+                    )
+                    return
+            except ValueError:
+                await self._send_to_admin(
+                    "❌ *Invalid limit*\n\n"
+                    "Usage: /checkdeleted `<limit>`\n\n"
+                    "Examples:\n"
+                    "• `/checkdeleted` - Check last 50 signals\n"
+                    "• `/checkdeleted 100` - Check last 100 signals"
+                )
+                return
+        
+        await self._send_to_admin(f"⏳ Checking {limit} most recent signals for deletions...")
+        
+        # Get recent signals from database
+        signals = await self._signal_db.get_signals_with_pnl(days=None, limit=limit)
+        
+        if not signals:
+            await self._send_to_admin(
+                f"📭 *No signals found in database*\n\n"
+                "Try running `/syncsignals` or `/bootstrap` first."
+            )
+            return
+        
+        # Get message IDs
+        msg_ids = []
+        for sig in signals:
+            signal = sig.signal if hasattr(sig, 'signal') else sig
+            if hasattr(signal, 'telegram_msg_id') and signal.telegram_msg_id:
+                msg_ids.append(signal.telegram_msg_id)
+        
+        if not msg_ids:
+            await self._send_to_admin(
+                "❌ *No message IDs found in signals*\n\n"
+                "Signals may not have been synced with message ID metadata."
+            )
+            return
+        
+        # Check which messages are deleted
+        deleted_status = await self.check_deleted_messages(msg_ids)
+        
+        deleted_count = sum(1 for is_del in deleted_status.values() if is_del)
+        total_count = len(deleted_status)
+        deletion_rate = (deleted_count / total_count * 100) if total_count > 0 else 0
+        
+        # Build response
+        status_emoji = "🚨" if deletion_rate > 50 else "⚠️" if deletion_rate > 25 else "✅"
+        
+        response = (
+            f"{status_emoji} *Deleted Signal Analysis*\n\n"
+            f"📊 *Statistics:*\n"
+            f"• Total signals checked: `{total_count}`\n"
+            f"• Deleted: `{deleted_count}` ❌\n"
+            f"• Active: `{total_count - deleted_count}` ✅\n"
+            f"• Deletion rate: `{deletion_rate:.1f}%`\n\n"
+        )
+        
+        if deletion_rate > 50:
+            response += (
+                "⚠️ *High deletion rate detected!*\n"
+                "More than half of signals have been deleted.\n"
+                "This may indicate the channel is cleaning up failed calls.\n\n"
+            )
+        
+        response += (
+            "💡 *Tips:*\n"
+            "• Deleted signals show as ~~strikethrough~~ in `/signalpnl` and `/realpnl`\n"
+            "• Use deletion rate as a quality indicator\n"
+            "• Higher deletion rates may suggest less transparency"
+        )
+        
+        await self._send_to_admin(response)
     
     async def _cmd_sync_signals(self, args: str) -> None:
         """

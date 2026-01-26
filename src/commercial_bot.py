@@ -20,7 +20,7 @@ from typing import Any, Optional, TYPE_CHECKING
 from telethon import TelegramClient
 from telethon.tl.custom import Button
 
-from src.signal_publisher import SignalPublisher, BroadcastConfig, BroadcastSignal
+from src.signal_publisher import SignalPublisher, BroadcastConfig
 from src.subscription_manager import (
     SubscriptionManager, PaymentWallets, SubscriptionPlan,
     SubscriptionStatus, Subscriber, PaymentMethod,
@@ -119,26 +119,31 @@ class CommercialBot:
         logger.info("✅ Commercial features initialized")
 
     async def _init_publisher(self) -> None:
-        """Initialize signal publisher."""
+        """Initialize signal publisher for AstroX-style channel broadcasting."""
         public_settings = self._settings.public_channel
 
-        if not public_settings.public_channel_id and not public_settings.public_channel_username:
-            logger.info("Public channel not configured, signal broadcasting disabled")
+        if not public_settings.premium_channel_id:
+            logger.info("Premium channel not configured, signal forwarding disabled")
             return
 
         config = BroadcastConfig(
             public_channel_id=public_settings.public_channel_id,
-            public_channel_username=public_settings.public_channel_username,
             premium_channel_id=public_settings.premium_channel_id,
             min_multiplier_to_broadcast=public_settings.min_multiplier_to_broadcast,
-            broadcast_delay_seconds=public_settings.broadcast_delay_seconds,
-            show_token_address=public_settings.show_token_address_public,
-            include_cta=public_settings.include_cta,
+            show_token_address_public=public_settings.show_token_address_public,
             bot_name=public_settings.bot_name,
             bot_username=public_settings.bot_username,
         )
 
-        self._signal_publisher = SignalPublisher(self._client, config)
+        # State file for signal mappings
+        import os
+        state_file = os.getenv("SIGNAL_MAPPINGS_FILE", "signal_mappings.json")
+
+        self._signal_publisher = SignalPublisher(
+            self._client,
+            config,
+            state_file=state_file
+        )
 
         if await self._signal_publisher.initialize():
             logger.info("✅ Signal publisher initialized")
@@ -212,66 +217,94 @@ class CommercialBot:
             await self._hit_rate_tracker.save()
 
     # =========================================================================
-    # Signal Broadcasting
+    # Signal Broadcasting (AstroX-style)
     # =========================================================================
 
-    async def broadcast_winner(
+    async def forward_ape_signal(
         self,
+        source_msg_id: int,
         token_symbol: str,
         token_address: str,
-        multiplier: float,
-        entry_time: datetime,
         entry_fdv: Optional[float] = None,
-        current_fdv: Optional[float] = None,
-        signal_msg_id: Optional[int] = None,
-    ) -> None:
+    ) -> Optional[int]:
         """
-        Broadcast a winning signal to public/premium channels.
+        Forward an ape signal from Trenches to Premium channel.
+
+        This mirrors the signal to the premium channel immediately.
 
         Args:
+            source_msg_id: Original message ID in Trenches channel
             token_symbol: Token symbol
-            token_address: Token address
-            multiplier: Current multiplier
-            entry_time: When signal was called
-            entry_fdv: FDV at entry
-            current_fdv: Current FDV
-            signal_msg_id: Original signal message ID
+            token_address: Token contract address
+            entry_fdv: Entry FDV in USD
+
+        Returns:
+            Message ID in premium channel, or None if failed
         """
         if not self._signal_publisher:
-            return
+            return None
 
-        signal = BroadcastSignal(
+        premium_msg_id = await self._signal_publisher.forward_ape_signal(
+            source_msg_id=source_msg_id,
             token_symbol=token_symbol,
             token_address=token_address,
-            entry_time=entry_time,
-            alert_time=datetime.now(timezone.utc),
-            multiplier=multiplier,
             entry_fdv=entry_fdv,
-            current_fdv=current_fdv,
-            signal_msg_id=signal_msg_id,
         )
 
-        # Major wins get immediate broadcast
-        if multiplier >= 10:
-            await self._signal_publisher.broadcast_immediately(signal)
-        else:
-            await self._signal_publisher.queue_broadcast(signal)
+        # Record in hit rate tracker
+        if self._hit_rate_tracker and premium_msg_id:
+            signal_id = str(source_msg_id)
+            self._hit_rate_tracker.record_signal(
+                signal_id=signal_id,
+                token_symbol=token_symbol,
+                token_address=token_address,
+                entry_fdv=entry_fdv,
+            )
+
+        return premium_msg_id
+
+    async def send_profit_update(
+        self,
+        source_msg_id: int,
+        multiplier: float,
+        current_fdv: Optional[float] = None,
+    ) -> bool:
+        """
+        Send a profit UPDATE message as a reply to the original ape signal.
+
+        This is called when a signal hits a new milestone (2X, 3X, etc.)
+        The update is sent as a reply in the premium channel, and on
+        first 2X+ hit, also forwards to public channel.
+
+        Args:
+            source_msg_id: Original message ID in Trenches channel
+            multiplier: Current multiplier (e.g., 2.5 for 2.5X)
+            current_fdv: Current FDV
+
+        Returns:
+            True if update was sent successfully
+        """
+        if not self._signal_publisher:
+            return False
+
+        result = await self._signal_publisher.send_profit_update(
+            source_msg_id=source_msg_id,
+            multiplier=multiplier,
+            current_fdv=current_fdv,
+        )
 
         # Update hit rate tracker
-        if self._hit_rate_tracker:
-            signal_id = str(signal_msg_id) if signal_msg_id else token_address
-            record = self._hit_rate_tracker.get_signal(signal_id)
-            if record:
-                self._hit_rate_tracker.update_signal(signal_id, multiplier)
-            else:
-                record = self._hit_rate_tracker.record_signal(
-                    signal_id=signal_id,
-                    token_symbol=token_symbol,
-                    token_address=token_address,
-                    entry_time=entry_time,
-                    entry_fdv=entry_fdv,
-                )
-                self._hit_rate_tracker.update_signal(signal_id, multiplier)
+        if self._hit_rate_tracker and result:
+            signal_id = str(source_msg_id)
+            self._hit_rate_tracker.update_signal(signal_id, multiplier)
+
+        return result
+
+    def get_signal_mapping(self, source_msg_id: int):
+        """Get signal mapping for a source message ID."""
+        if not self._signal_publisher:
+            return None
+        return self._signal_publisher.get_mapping(source_msg_id)
 
     # =========================================================================
     # Subscription Handling
