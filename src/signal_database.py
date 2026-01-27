@@ -138,15 +138,24 @@ def parse_signal_message(raw_text: str) -> tuple[Optional[str], Optional[str], O
         symbol = symbol_match.group(1)
     
     # Extract token address (Solana base58 - typically 32-44 chars)
-    address_match = re.search(r'[`├└]\s*([1-9A-HJ-NP-Za-km-z]{32,44})', raw_text)
+    # Handles both formats:
+    # - VOLUME+SM: ├ `ADDRESS` or └ `ADDRESS`
+    # - MAIN: ├ **`ADDRESS`** with markdown formatting
+    address_match = re.search(r'[`├└]\s*\*?\*?`?([1-9A-HJ-NP-Za-km-z]{32,44})', raw_text)
     if address_match:
         address = address_match.group(1)
     
-    # Extract FDV: FDV: $XXK or $XX.XK or $XXXK
-    fdv_match = re.search(r'FDV[`:\s]*\$?([\d.]+)\s*K', raw_text, re.IGNORECASE)
+    # Extract FDV: Various formats
+    # - VOLUME+SM: FDV: $XXK or $XX.XK or $XXXK (abbreviated)
+    # - MAIN: FDV: $2,200,000.29 (full number with commas)
+    fdv_match = re.search(r'FDV[`:\s]*\*?\*?\$?([\d,]+\.?\d*)\s*K?', raw_text, re.IGNORECASE)
     if fdv_match:
         try:
-            fdv = float(fdv_match.group(1)) * 1000
+            fdv_str = fdv_match.group(1).replace(',', '')
+            fdv = float(fdv_str)
+            # If it ends with K, multiply by 1000
+            if 'K' in raw_text[fdv_match.start():fdv_match.end() + 2].upper():
+                fdv *= 1000
         except ValueError:
             pass
     
@@ -331,12 +340,19 @@ class SignalDatabase:
                     cutoff = datetime.now(timezone.utc) - timedelta(days=days)
                     date_filter = f"AND message_timestamp >= '{cutoff.isoformat()}'"
                 
-                # Get signals
+                # Get signals - use channel-specific patterns
+                if self._channel_id == "main":
+                    # MAIN channel uses NEW-LAUNCH and MID-SIZED signal formats
+                    signal_filter = "(raw_text LIKE '%NEW-LAUNCH%' OR raw_text LIKE '%MID-SIZED%')"
+                else:
+                    # VOLUME+SM channel uses APE SIGNAL DETECTED format
+                    signal_filter = "raw_text LIKE '%APE SIGNAL DETECTED%'"
+
                 signals_query = f'''
                     SELECT id, telegram_message_id, raw_text, message_timestamp
                     FROM raw_telegram_messages
                     WHERE chat_title = $1
-                    AND raw_text LIKE '%APE SIGNAL DETECTED%'
+                    AND {signal_filter}
                     {date_filter}
                     ORDER BY message_timestamp DESC
                 '''
