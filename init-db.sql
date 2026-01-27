@@ -3,6 +3,9 @@
 -- ==============================================================================
 -- This script creates the required tables for signal PnL tracking
 
+-- Enable pg_trgm extension for fast LIKE queries (Grafana dashboard)
+CREATE EXTENSION IF NOT EXISTS pg_trgm;
+
 -- Create raw_telegram_messages table for storing signals and alerts
 CREATE TABLE IF NOT EXISTS raw_telegram_messages (
     id SERIAL PRIMARY KEY,
@@ -37,6 +40,50 @@ CREATE INDEX IF NOT EXISTS idx_rtm_chat_title_timestamp
 CREATE INDEX IF NOT EXISTS idx_rtm_raw_json_reply
     ON raw_telegram_messages((raw_json->>'reply_to_msg_id'));
 
+-- Trigram index for fast LIKE '%pattern%' queries (requires pg_trgm)
+CREATE INDEX IF NOT EXISTS idx_rtm_raw_text_trgm
+    ON raw_telegram_messages USING gin (raw_text gin_trgm_ops);
+
+-- ==============================================================================
+-- Materialized View for Daily Signal Stats (Grafana Performance)
+-- ==============================================================================
+-- Pre-aggregated daily stats to avoid expensive real-time calculations
+
+CREATE MATERIALIZED VIEW IF NOT EXISTS mv_daily_signal_stats AS
+WITH signals AS (
+    SELECT 
+        DATE(message_timestamp) AS day,
+        chat_title,
+        telegram_message_id,
+        CASE 
+            WHEN chat_title LIKE '%VOLUME%' THEN 'VOLSM'
+            ELSE 'MAIN'
+        END AS channel
+    FROM raw_telegram_messages
+    WHERE raw_text LIKE '%APE SIGNAL DETECTED%'
+       OR raw_text LIKE '%NEW-LAUNCH%'
+       OR raw_text LIKE '%MID-SIZED%'
+),
+profit_alerts AS (
+    SELECT DISTINCT (raw_json->>'reply_to_msg_id')::BIGINT AS signal_id
+    FROM raw_telegram_messages
+    WHERE raw_text LIKE '%PROFIT ALERT%'
+      AND raw_json->>'reply_to_msg_id' IS NOT NULL
+)
+SELECT 
+    s.day,
+    s.channel,
+    COUNT(*) AS total_signals,
+    COUNT(pa.signal_id) AS winning_signals,
+    ROUND(COUNT(pa.signal_id)::NUMERIC / NULLIF(COUNT(*), 0) * 100, 2) AS win_rate_pct
+FROM signals s
+LEFT JOIN profit_alerts pa ON pa.signal_id = s.telegram_message_id
+GROUP BY s.day, s.channel;
+
+-- Unique index for fast refresh and lookups
+CREATE UNIQUE INDEX IF NOT EXISTS idx_mv_daily_stats_day_channel 
+    ON mv_daily_signal_stats(day, channel);
+
 -- ==============================================================================
 -- Channel State Table - Tracks sync cursors per channel
 -- ==============================================================================
@@ -64,8 +111,14 @@ GRANT USAGE, SELECT ON SEQUENCE raw_telegram_messages_id_seq TO postgres;
 GRANT ALL PRIVILEGES ON TABLE telegram_channel_state TO postgres;
 GRANT USAGE, SELECT ON SEQUENCE telegram_channel_state_id_seq TO postgres;
 
+-- Grant permissions on materialized view
+GRANT SELECT ON mv_daily_signal_stats TO postgres;
+
 -- Log initialization
 DO $$
 BEGIN
     RAISE NOTICE 'Database initialized successfully for Solana Trading Bot';
+    RAISE NOTICE 'pg_trgm extension enabled for fast LIKE queries';
+    RAISE NOTICE 'Materialized view mv_daily_signal_stats created';
+    RAISE NOTICE 'Run REFRESH MATERIALIZED VIEW CONCURRENTLY mv_daily_signal_stats; periodically';
 END $$;

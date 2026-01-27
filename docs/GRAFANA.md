@@ -2,6 +2,26 @@
 
 This guide explains how to use the Grafana dashboard for trading bot analytics.
 
+## Prerequisites
+
+Before starting Grafana, ensure:
+
+1. **PostgreSQL is running** with data bootstrapped:
+   ```bash
+   docker compose up -d postgres
+   docker compose ps postgres  # Should be "healthy"
+   ```
+
+2. **Bootstrap completed** - Run `/bootstrap` in the trading bot to populate historical data
+
+3. **Required environment variables** in `.env`:
+   ```bash
+   POSTGRES_PASSWORD=your_secure_password      # Required
+   GRAFANA_ADMIN_PASSWORD=your_admin_password  # Required (no default)
+   ```
+
+---
+
 ## Quick Start
 
 ### 1. Start Grafana
@@ -114,6 +134,19 @@ Net PNL % = (multiplier × 0.95 - 1) × 100
 - **Win**: Signal has at least one profit alert
 - **Loss**: No profit alert after 3+ days (assumed rugged)
 
+### Signal Detection Patterns
+
+The dashboard identifies signals using these SQL patterns:
+
+| Channel | Pattern | Example |
+|---------|---------|----------|
+| VOLSM | `%APE SIGNAL DETECTED%` | `// VOLUME + SM APE SIGNAL DETECTED` |
+| MAIN | `%NEW-LAUNCH%` | `🚀 **NEW-LAUNCH SIGNAL**` |
+| MAIN | `%MID-SIZED%` | `// MID-SIZED SIGNAL DETECTED` |
+| Both | `%PROFIT ALERT%` | `🎯 PROFIT ALERT` |
+
+Profit alerts are linked to signals via `raw_json->>'reply_to_msg_id'`.
+
 ---
 
 ## Troubleshooting
@@ -206,4 +239,4 @@ server {
 ## Support
 
 - Bot commands: `/signalpnl`, `/realpnl`, `/menu`
-- Issues: [GitHub Issues](https://github.com/anthropics/claude-code/issues)
+- Issues: [GitHub Issues](https://github.com/nhattruong0204/solana-trenches-trading-bot/issues)

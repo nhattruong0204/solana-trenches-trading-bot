@@ -204,12 +204,14 @@ services:
 
     environment:
       - GF_SECURITY_ADMIN_USER=admin
-      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_ADMIN_PASSWORD:-admin}
+      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_ADMIN_PASSWORD:?GRAFANA_ADMIN_PASSWORD is required - set in .env}
       - GF_USERS_ALLOW_SIGN_UP=false
       - GF_AUTH_ANONYMOUS_ENABLED=false
       - GF_INSTALL_PLUGINS=
-      # Pass PostgreSQL password for datasource
+      # PostgreSQL connection settings
       - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-postgres}
+      # Security: set query timeout to prevent runaway queries
+      - GF_DATABASE_QUERY_TIMEOUT=30
 
     # Resource limits
     deploy:
