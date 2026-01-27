@@ -132,8 +132,11 @@ def parse_signal_message(raw_text: str) -> tuple[Optional[str], Optional[str], O
     address = None
     fdv = None
     
-    # Extract token symbol: Token: - $SYMBOL or Token: $SYMBOL
-    symbol_match = re.search(r'Token:\s*-?\s*\$(\w+)', raw_text)
+    # Extract token symbol - handles multiple formats:
+    # - VOLUME+SM: Token: - $SYMBOL or Token: $SYMBOL
+    # - MAIN: **Token:** - **$SYMBOL** (with markdown formatting)
+    # Pattern: optional ** before Token, then :, optional -, optional **, $, symbol, optional **
+    symbol_match = re.search(r'\*?\*?Token:\*?\*?\s*-?\s*\*?\*?\$(\w+)', raw_text)
     if symbol_match:
         symbol = symbol_match.group(1)
     
@@ -146,16 +149,20 @@ def parse_signal_message(raw_text: str) -> tuple[Optional[str], Optional[str], O
         address = address_match.group(1)
     
     # Extract FDV: Various formats
-    # - VOLUME+SM: FDV: $XXK or $XX.XK or $XXXK (abbreviated)
-    # - MAIN: FDV: $2,200,000.29 (full number with commas)
-    fdv_match = re.search(r'FDV[`:\s]*\*?\*?\$?([\d,]+\.?\d*)\s*K?', raw_text, re.IGNORECASE)
+    # - VOLUME+SM: FDV: $XXK or FDV: $50.5K (abbreviated)
+    # - MAIN: **FDV:**         $96K (with markdown and spacing)
+    # Pattern: optional **, FDV, optional :, optional **, whitespace, optional $, number, K/M
+    fdv_match = re.search(r'\*?\*?FDV:?\*?\*?\s+\$?([\d,]+\.?\d*)\s*(K|M)?', raw_text, re.IGNORECASE)
     if fdv_match:
         try:
             fdv_str = fdv_match.group(1).replace(',', '')
             fdv = float(fdv_str)
-            # If it ends with K, multiply by 1000
-            if 'K' in raw_text[fdv_match.start():fdv_match.end() + 2].upper():
-                fdv *= 1000
+            suffix = fdv_match.group(2)
+            if suffix:
+                if suffix.upper() == 'K':
+                    fdv *= 1000
+                elif suffix.upper() == 'M':
+                    fdv *= 1000000
         except ValueError:
             pass
     

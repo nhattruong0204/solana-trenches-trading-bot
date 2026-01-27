@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **MAIN Channel Signal Parsing** (`src/signal_database.py`)
+  - Fixed token symbol regex to handle MAIN channel's markdown format `**Token:** - **$SYMBOL**`
+  - Fixed FDV regex to handle MAIN channel's format `├ **FDV:**         $96K`
+  - `/signalpnl` and `/realpnl` now correctly display token names instead of `$UNKNOWN`
+  
+- **All Winners Display** (`src/main_tracker_bot.py`)
+  - Changed "Top 5 Winners" to show ALL winners with message splitting for Telegram's 4096 char limit
+  - Applies to both `/signalpnl` and `/realpnl` commands
+
 ### In Progress
 <!-- Add features currently being worked on here -->
 <!-- Example:

@@ -205,6 +205,42 @@ class TestParseSignalMessage:
         assert address == "6YK4hC2rVQwKwXLJ9rgJCHhktNJPpFNvqjAh7fW1pump"
         assert fdv == 50000.0
     
+    def test_parse_main_channel_new_launch_signal(self):
+        """Test parsing MAIN channel NEW-LAUNCH signal format with markdown."""
+        message = """🚀 **NEW-LAUNCH SIGNAL**
+━━━━━━━━━━━━━━━━━━━━━━━━━
+**Token:** - **$TOKENFED**
+├ `HUDTj9245rRy6XvjkGBNLdbz9WuP1phE6bubNj4qTRND`
+└ 👾 #SOL
+
+📊 **TOKEN DATA**
+├ **Price:**       $0.000096
+├ **FDV:**         $96K
+└ **LP:**          $32K
+"""
+        symbol, address, fdv = parse_signal_message(message)
+        
+        assert symbol == "TOKENFED"
+        assert address == "HUDTj9245rRy6XvjkGBNLdbz9WuP1phE6bubNj4qTRND"
+        assert fdv == 96000.0
+    
+    def test_parse_main_channel_mid_sized_signal(self):
+        """Test parsing MAIN channel MID-SIZED signal format."""
+        message = """`// MID-SIZED SIGNAL DETECTED`
+Token: - **$afk**
+├ `kMKX8hBaj3BTRBbeYix9c16EieBP5dih8DTSSwCpump`
+└ 👾 #SOL
+
+📊 **TOKEN DATA**
+├ `Price`:       $0.001275
+├ `FDV`:         $1.3M
+└ `LP`:          $117K
+"""
+        symbol, address, fdv = parse_signal_message(message)
+        
+        assert symbol == "afk"
+        assert address == "kMKX8hBaj3BTRBbeYix9c16EieBP5dih8DTSSwCpump"
+    
     def test_parse_signal_with_backtick_address(self):
         """Test parsing signal with backtick address format."""
         message = """
