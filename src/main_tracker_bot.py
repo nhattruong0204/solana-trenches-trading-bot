@@ -191,16 +191,22 @@ class MainTrackerBot:
         """Register command and callback handlers."""
         if not self._client:
             return
-        
+
+        logger.info("Registering command handlers...")
+
         # Command handler
         @self._client.on(events.NewMessage(pattern=r'^/'))
         async def handle_command(event):
+            logger.info(f"Received command from {event.sender_id}: {event.text}")
             await self._handle_command(event)
         
         # Callback handler (button presses)
         @self._client.on(events.CallbackQuery)
         async def handle_callback(event):
+            logger.info(f"Received callback from {event.sender_id}: {event.data}")
             await self._handle_callback(event)
+
+        logger.info("✅ Command handlers registered")
     
     async def _handle_command(self, event) -> None:
         """Handle text commands."""
