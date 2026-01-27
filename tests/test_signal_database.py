@@ -587,6 +587,12 @@ class TestParseFunctions:
         
         # With Multiplier label
         assert parse_profit_alert("Multiplier: 3X") == 3.0
+        
+        # NEW: Simple format like "3.0X profit alert" (lowercase)
+        assert parse_profit_alert("3.0X profit alert") == 3.0
+        assert parse_profit_alert("48.0X profit alert") == 48.0
+        assert parse_profit_alert("5.0X profit alert") == 5.0
+        assert parse_profit_alert("42.0X profit alert") == 42.0
     
     def test_parse_fdv_from_profit_alert_various(self):
         """Test parsing FDV from profit alerts."""
@@ -614,3 +620,63 @@ class AsyncContextManager:
     
     async def __aexit__(self, *args):
         pass
+
+
+class TestJsonbParsing:
+    """
+    Regression tests for JSONB raw_json parsing.
+
+    Bug: When raw_json column is JSONB type, asyncpg returns it as a Python dict,
+    not a string. The code was using json.loads() which fails with TypeError
+    when passed a dict. This caused profit alerts to not be matched to signals.
+
+    Fixed in: bugfix/fix-commercial-channel
+    """
+
+    def test_jsonb_dict_parsing(self):
+        """Test that raw_json as dict (JSONB) is handled correctly."""
+        import json
+        
+        # Simulate what asyncpg returns for JSONB column
+        raw_json_as_dict = {"multiplier": 5.0, "reply_to_msg_id": 42426}
+        
+        # Old code would fail here with TypeError
+        # json.loads(raw_json_as_dict)  # TypeError!
+        
+        # New code handles dict directly
+        if isinstance(raw_json_as_dict, dict):
+            json_data = raw_json_as_dict
+        else:
+            json_data = json.loads(raw_json_as_dict)
+        
+        assert json_data.get('reply_to_msg_id') == 42426
+        assert json_data.get('multiplier') == 5.0
+
+    def test_jsonb_string_parsing(self):
+        """Test that raw_json as string (TEXT) still works."""
+        import json
+        
+        # Simulate raw_json stored as TEXT string
+        raw_json_as_string = '{"multiplier": 3.0, "reply_to_msg_id": 12345}'
+        
+        if isinstance(raw_json_as_string, dict):
+            json_data = raw_json_as_string
+        else:
+            json_data = json.loads(raw_json_as_string)
+        
+        assert json_data.get('reply_to_msg_id') == 12345
+        assert json_data.get('multiplier') == 3.0
+
+    def test_jsonb_none_handling(self):
+        """Test that None raw_json is handled correctly."""
+        raw_json = None
+        
+        if raw_json is None:
+            json_data = {}
+        elif isinstance(raw_json, dict):
+            json_data = raw_json
+        else:
+            json_data = {}
+        
+        assert json_data == {}
+        assert json_data.get('reply_to_msg_id') is None

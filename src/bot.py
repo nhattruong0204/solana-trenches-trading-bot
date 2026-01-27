@@ -228,7 +228,7 @@ class TradingBot:
             raise RuntimeError("Telegram client not initialized")
         
         # Get monitored channel configs from settings
-        monitored_channels = self._settings.channels.monitored_channels
+        monitored_channels = self._settings.channel.monitored_channels
         
         if not monitored_channels:
             # Fallback to legacy single-channel mode
