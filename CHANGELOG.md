@@ -16,6 +16,63 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 -->
 
 ### Added
+- **Grafana Analytics Dashboard** (`grafana/`)
+  - Professional trading analytics dashboard for visualizing bot performance
+  - Auto-provisioned via Docker Compose with PostgreSQL datasource
+  - Health check panels: Signal PNL %, Win Rate %, Signals Today, Last Signal Age
+  - KPI panels: Total Signals, Avg Multiplier, Est. Rugged %, Best Multiplier
+  - Time-series: Cumulative PNL Over Time, 7-Day Rolling Win Rate
+  - Tables: Top 10 Winners, Worst 10 Losers (likely rugged)
+  - Channel comparison: VOLSM vs MAIN side-by-side stats
+  - Dashboard filters: Time range (1d, 7d, 30d, 90d, 365d), Channel (All, VOLSM, MAIN)
+  - Fee-adjusted PNL calculations (2.5% buy + 2.5% sell)
+  - New Docker Compose service: `grafana` (port 3000)
+  - New environment variable: `GRAFANA_ADMIN_PASSWORD`
+  - Performance indexes added to `init-db.sql` for dashboard queries
+  - Documentation: `docs/GRAFANA.md`
+
+- **MAIN Channel Separate Tracker Bot** (`main_tracker.py`, `src/main_tracker_bot.py`)
+  - New standalone bot to track signals from @fttrenches_sol (MAIN channel)
+  - Does NOT execute trades - signal tracking and PnL analysis only
+  - Commands: `/syncsignals`, `/bootstrap`, `/signalpnl`, `/realpnl`, `/menu`, `/help`
+  - Shares PostgreSQL database with trading bot (uses `chat_title` column for channel distinction)
+  - Uses existing parsers: `MainChannelBuySignalParser`, `MainChannelProfitAlertParser`
+  - New entry point: `main_tracker.py`
+  - New environment variable: `MAIN_BOT_TOKEN` (separate Telegram bot token)
+  - New docker-compose service: `main-tracker` (runs alongside `trading-bot`)
+  - Resource-efficient: 256MB RAM limit vs 512MB for trading bot
+  
+- **SignalDatabase Channel Filtering** (`src/signal_database.py`)
+  - Added `channel_id` constructor parameter to `SignalDatabase` class
+  - New `_active_channel_name` property for per-instance channel filtering
+  - All database queries now use instance-level channel filter
+  - Supports running multiple tracker bots against same database
+
+- **Multi-Channel Monitoring Support**
+  - New channel registry in `src/constants.py`: `CHANNEL_VOLSM`, `CHANNEL_MAIN` identifiers
+  - New MAIN channel constants: `TRENCHES_MAIN_CHANNEL_USERNAME`, `TRENCHES_MAIN_CHANNEL_NAME`
+  - New signal indicators: `MAIN_BUY_SIGNAL_INDICATORS`, `MAIN_PROFIT_ALERT_INDICATORS`
+  - `MonitoredChannelConfig` dataclass in `src/config.py` for channel-specific settings
+  - `ChannelSettings.monitored_channels` property builds channel list from env vars
+  - Environment variables: `MAIN_CHANNEL_ENABLED`, `MAIN_CHANNEL_TRADING` (default: False)
+  - `ParserRegistry` class in `src/parsers.py` maps channels to channel-specific parsers
+  - `MainChannelBuySignalParser` and `MainChannelProfitAlertParser` for MAIN channel format
+  - `ChannelMessageParser` for channel-aware message parsing
+  - `MessageParser` now accepts optional `channel_id` parameter for channel-specific parsing
+  - Multi-channel support in `bot.py`:
+    - `_channel_entities` dict stores all monitored channel entities
+    - `_monitored_configs` maps Telegram channel IDs to config objects
+    - `_init_channel()` now resolves all enabled channels
+    - Event handler listens to all monitored channels
+    - Messages routed to channel-specific parsers
+    - Commercial mirroring only for channels with `commercial_mirroring=True` (default: VOLSM only)
+    - Trading can be enabled/disabled per channel
+  - `SignalDatabase.CHANNEL_DISPLAY_NAMES` mapping and `_get_channel_display_name()` helper
+  - `insert_signal()` now accepts optional `channel_name` parameter
+  - `record_signal()` and `record_profit_alert()` in notification_bot accept `channel_name`
+  - Updated startup banner to show all monitored channels with status icons
+  - Plan document: `docs/PLAN_MULTI_CHANNEL.md`
+
 - AI context workflow documentation for better agent collaboration
   - `.github/copilot-instructions.md` — GitHub Copilot instructions
   - `CLAUDE_CONTEXT.md` — Claude Code context file
@@ -39,6 +96,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     `src/bot.py:454-470` (mirroring in message handler)
 
 ### Changed
+- `MessageParser.__init__()` now optionally accepts `channel_id` for channel-specific parsing
+- `_handle_buy_signal()` accepts `channel_id` and `trading_enabled` parameters
+- `_handle_profit_alert()` accepts `channel_id` parameter
 - Updated `_on_new_message()` in `bot.py` to mirror ALL messages to Premium channel (not just parsed signals)
 - `send_profit_update()` now only tracks milestones and triggers Public channel forwarding (Premium already mirrored)
 - `_forward_win_to_public()` now uses raw messages when available, with CTA appended separately
@@ -49,6 +109,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Root cause: PR #6 merge lost `_ensure_trading_client_connected()` and `_check_deleted_messages()` methods
   - Fix: Re-added both methods to `src/notification_bot.py` (lines 254-340)
   - Both methods were originally added in commit 7c8b9e9 and 7106535 but lost during merge
+- **CRITICAL: MAIN channel `/bootstrap` command failing with "database is locked"**
+  - Root cause 1: Parameter name mismatch - `_cmd_bootstrap_signals()` was calling
+    `update_channel_cursor(bootstrap_completed=True)` but the method signature expects
+    `mark_bootstrap_complete=True`. This caused a TypeError.
+  - Root cause 2: Session file conflict - both `trading-bot` and `main-tracker` could
+    potentially use the same Telegram session file, causing SQLite locking errors.
+  - Fix: Corrected parameter name in `src/main_tracker_bot.py:725`
+  - Fix: Updated `docker-compose.yml` to use dedicated session file `/app/data/main_tracker.session`
+    for main-tracker service (separate from trading-bot's `wallet_tracker_session`)
+  - Fix: Updated `.env.example` to document separate session requirement
+  - Tests: Added regression tests in `tests/test_main_tracker_bot.py`
 - `/syncsignals` and `/bootstrap` commands failing with "Cannot send requests while disconnected"
   - Root cause: Code only checked if Telegram client object existed, not if it was connected
   - Fix: Added `_ensure_trading_client_connected()` helper that checks connection state

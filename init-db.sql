@@ -24,12 +24,18 @@ CREATE TABLE IF NOT EXISTS raw_telegram_messages (
 );
 
 -- Create indexes for faster queries
-CREATE INDEX IF NOT EXISTS idx_raw_telegram_message_timestamp 
+CREATE INDEX IF NOT EXISTS idx_raw_telegram_message_timestamp
     ON raw_telegram_messages(message_timestamp);
-CREATE INDEX IF NOT EXISTS idx_raw_telegram_chat_id 
+CREATE INDEX IF NOT EXISTS idx_raw_telegram_chat_id
     ON raw_telegram_messages(telegram_chat_id);
-CREATE INDEX IF NOT EXISTS idx_raw_telegram_source_bot 
+CREATE INDEX IF NOT EXISTS idx_raw_telegram_source_bot
     ON raw_telegram_messages(source_bot);
+
+-- Performance indexes for Grafana dashboard queries
+CREATE INDEX IF NOT EXISTS idx_rtm_chat_title_timestamp
+    ON raw_telegram_messages(chat_title, message_timestamp DESC);
+CREATE INDEX IF NOT EXISTS idx_rtm_raw_json_reply
+    ON raw_telegram_messages((raw_json->>'reply_to_msg_id'));
 
 -- ==============================================================================
 -- Channel State Table - Tracks sync cursors per channel

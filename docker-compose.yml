@@ -109,6 +109,137 @@ services:
       - no-new-privileges:true
     read_only: false
 
+  # MAIN Channel Signal Tracker Bot (separate bot, same database)
+  main-tracker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: production
+    
+    container_name: main-tracker-bot
+    restart: unless-stopped
+    
+    # Wait for postgres to be ready
+    depends_on:
+      postgres:
+        condition: service_healthy
+    
+    # Mount volumes for persistence (shares data directory with trading-bot)
+    volumes:
+      - ./data:/app/data
+    
+    # Environment file (same as trading-bot)
+    env_file:
+      - .env
+    
+    # Environment variables for MAIN tracker
+    environment:
+      # Use dedicated session file for main-tracker to avoid SQLite locking conflicts
+      # IMPORTANT: Do NOT use the same session file as trading-bot
+      - MAIN_SESSION_FILE=/app/data/main_tracker.session
+      - SESSION_FILE=/app/data/main_tracker.session
+      - MAIN_LOG_FILE=/app/data/main_tracker.log
+      # Database connection - uses same PostgreSQL
+      - POSTGRES_HOST=postgres
+      - POSTGRES_PORT=5432
+      - POSTGRES_USER=postgres
+      - POSTGRES_DATABASE=wallet_tracker
+    
+    # Override entrypoint for MAIN tracker (not the trading bot)
+    entrypoint: ["python", "-u", "main_tracker.py"]
+    command: []
+    
+    # Resource limits (smaller footprint than trading bot)
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 256M
+        reservations:
+          cpus: '0.1'
+          memory: 64M
+    
+    # Logging configuration
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    
+    # Network configuration
+    networks:
+      - trading-network
+    
+    # Health check
+    healthcheck:
+      test: ["CMD", "python", "-c", "import sys; sys.exit(0)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    
+    # Security options
+    security_opt:
+      - no-new-privileges:true
+    read_only: false
+
+  # Grafana Dashboard for Trading Analytics
+  grafana:
+    image: grafana/grafana:latest
+    container_name: trading-grafana
+    restart: unless-stopped
+
+    # Wait for postgres to be ready
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+    ports:
+      - "3000:3000"
+
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
+
+    environment:
+      - GF_SECURITY_ADMIN_USER=admin
+      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_ADMIN_PASSWORD:-admin}
+      - GF_USERS_ALLOW_SIGN_UP=false
+      - GF_AUTH_ANONYMOUS_ENABLED=false
+      - GF_INSTALL_PLUGINS=
+      # Pass PostgreSQL password for datasource
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-postgres}
+
+    # Resource limits
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 256M
+        reservations:
+          cpus: '0.1'
+          memory: 64M
+
+    # Logging configuration
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+    # Network configuration
+    networks:
+      - trading-network
+
+    # Health check
+    healthcheck:
+      test: ["CMD-SHELL", "wget --no-verbose --tries=1 --spider http://localhost:3000/api/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
 networks:
   trading-network:
     driver: bridge
@@ -116,3 +247,4 @@ networks:
 volumes:
   solana-trading-bot_postgres_data:
     external: true
+  grafana_data:

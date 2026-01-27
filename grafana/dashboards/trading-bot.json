@@ -1,0 +1,862 @@
+{
+  "annotations": {
+    "list": []
+  },
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 0,
+  "id": null,
+  "links": [],
+  "panels": [
+    {
+      "collapsed": false,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 0 },
+      "id": 100,
+      "panels": [],
+      "title": "Health Check (30-Second Assessment)",
+      "type": "row"
+    },
+    {
+      "datasource": { "type": "postgres", "uid": "${DS_POSTGRESQL}" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "thresholds" },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "red", "value": null },
+              { "color": "yellow", "value": 0 },
+              { "color": "green", "value": 10 }
+            ]
+          },
+          "unit": "percent"
+        },
+        "overrides": []
+      },
+      "gridPos": { "h": 4, "w": 6, "x": 0, "y": 1 },
+      "id": 1,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": ["lastNotNull"],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "auto"
+      },
+      "pluginVersion": "10.0.0",
+      "targets": [
+        {
+          "datasource": { "type": "postgres", "uid": "${DS_POSTGRESQL}" },
+          "editorMode": "code",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "WITH signals AS (\n  SELECT telegram_message_id as signal_msg_id\n  FROM raw_telegram_messages\n  WHERE chat_title LIKE CASE WHEN '${channel}' = 'all' THEN '%From The Trenches%' ELSE '${channel}' END\n    AND (raw_text LIKE '%APE SIGNAL DETECTED%'\n         OR raw_text LIKE '%NEW-LAUNCH%'\n         OR raw_text LIKE '%MID-SIZED%')\n    AND message_timestamp >= NOW() - INTERVAL '${time_range}'\n),\nprofit_alerts AS (\n  SELECT\n    (raw_json->>'reply_to_msg_id')::BIGINT as reply_to_id,\n    MAX((REGEXP_MATCHES(raw_text, '\\*?\\*?([\\d.]+)\\s*X', 'i'))[1]::FLOAT) as max_mult\n  FROM raw_telegram_messages\n  WHERE raw_text LIKE '%PROFIT ALERT%'\n    AND raw_json->>'reply_to_msg_id' IS NOT NULL\n  GROUP BY (raw_json->>'reply_to_msg_id')::BIGINT\n)\nSELECT ROUND(AVG(\n  CASE WHEN pa.max_mult IS NOT NULL THEN (pa.max_mult * 0.95 - 1) * 100\n  ELSE -100 END\n), 2) as \"Signal PNL %\"\nFROM signals s\nLEFT JOIN profit_alerts pa ON pa.reply_to_id = s.signal_msg_id;",
+          "refId": "A",
+          "sql": { "columns": [], "groupBy": [], "limit": 50 }
+        }
+      ],
+      "title": "Signal PNL %",
+      "type": "stat"
+    },
+    {
+      "datasource": { "type": "postgres", "uid": "${DS_POSTGRESQL}" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "thresholds" },
+          "mappings": [],
+          "max": 100,
+          "min": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "red", "value": null },
+              { "color": "yellow", "value": 30 },
+              { "color": "green", "value": 50 }
+            ]
+          },
+          "unit": "percent"
+        },
+        "overrides": []
+      },
+      "gridPos": { "h": 4, "w": 6, "x": 6, "y": 1 },
+      "id": 2,
+      "options": {
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": ["lastNotNull"],
+          "fields": "",
+          "values": false
+        },
+        "showThresholdLabels": false,
+        "showThresholdMarkers": true
+      },
+      "pluginVersion": "10.0.0",
+      "targets": [
+        {
+          "datasource": { "type": "postgres", "uid": "${DS_POSTGRESQL}" },
+          "editorMode": "code",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "WITH signals AS (\n  SELECT telegram_message_id as signal_msg_id\n  FROM raw_telegram_messages\n  WHERE chat_title LIKE CASE WHEN '${channel}' = 'all' THEN '%From The Trenches%' ELSE '${channel}' END\n    AND (raw_text LIKE '%APE SIGNAL DETECTED%'\n         OR raw_text LIKE '%NEW-LAUNCH%'\n         OR raw_text LIKE '%MID-SIZED%')\n    AND message_timestamp >= NOW() - INTERVAL '${time_range}'\n),\nprofit_alerts AS (\n  SELECT DISTINCT (raw_json->>'reply_to_msg_id')::BIGINT as reply_to_id\n  FROM raw_telegram_messages\n  WHERE raw_text LIKE '%PROFIT ALERT%'\n    AND raw_json->>'reply_to_msg_id' IS NOT NULL\n)\nSELECT ROUND(\n  COUNT(*) FILTER (WHERE pa.reply_to_id IS NOT NULL)::NUMERIC /\n  NULLIF(COUNT(*), 0) * 100, 1\n) as \"Win Rate %\"\nFROM signals s\nLEFT JOIN profit_alerts pa ON pa.reply_to_id = s.signal_msg_id;",
+          "refId": "A",
+          "sql": { "columns": [], "groupBy": [], "limit": 50 }
+        }
+      ],
+      "title": "Win Rate %",
+      "type": "gauge"
+    },
+    {
+      "datasource": { "type": "postgres", "uid": "${DS_POSTGRESQL}" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "thresholds" },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "blue", "value": null }
+            ]
+          },
+          "unit": "none"
+        },
+        "overrides": []
+      },
+      "gridPos": { "h": 4, "w": 6, "x": 12, "y": 1 },
+      "id": 3,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": ["lastNotNull"],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "auto"
+      },
+      "pluginVersion": "10.0.0",
+      "targets": [
+        {
+          "datasource": { "type": "postgres", "uid": "${DS_POSTGRESQL}" },
+          "editorMode": "code",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT COUNT(*) as \"Signals Today\"\nFROM raw_telegram_messages\nWHERE chat_title LIKE CASE WHEN '${channel}' = 'all' THEN '%From The Trenches%' ELSE '${channel}' END\n  AND (raw_text LIKE '%APE SIGNAL DETECTED%'\n       OR raw_text LIKE '%NEW-LAUNCH%'\n       OR raw_text LIKE '%MID-SIZED%')\n  AND message_timestamp >= CURRENT_DATE;",
+          "refId": "A",
+          "sql": { "columns": [], "groupBy": [], "limit": 50 }
+        }
+      ],
+      "title": "Signals Today",
+      "type": "stat"
+    },
+    {
+      "datasource": { "type": "postgres", "uid": "${DS_POSTGRESQL}" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "thresholds" },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "yellow", "value": 60 },
+              { "color": "red", "value": 240 }
+            ]
+          },
+          "unit": "m"
+        },
+        "overrides": []
+      },
+      "gridPos": { "h": 4, "w": 6, "x": 18, "y": 1 },
+      "id": 4,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": ["lastNotNull"],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "auto"
+      },
+      "pluginVersion": "10.0.0",
+      "targets": [
+        {
+          "datasource": { "type": "postgres", "uid": "${DS_POSTGRESQL}" },
+          "editorMode": "code",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT \n  EXTRACT(EPOCH FROM (NOW() - MAX(message_timestamp))) / 60 as \"Last Signal (min)\"\nFROM raw_telegram_messages\nWHERE chat_title LIKE '%From The Trenches%'\n  AND (raw_text LIKE '%APE SIGNAL DETECTED%'\n       OR raw_text LIKE '%NEW-LAUNCH%'\n       OR raw_text LIKE '%MID-SIZED%');",
+          "refId": "A",
+          "sql": { "columns": [], "groupBy": [], "limit": 50 }
+        }
+      ],
+      "title": "Last Signal Age",
+      "type": "stat"
+    },
+    {
+      "collapsed": false,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 5 },
+      "id": 101,
+      "panels": [],
+      "title": "Key Performance Indicators",
+      "type": "row"
+    },
+    {
+      "datasource": { "type": "postgres", "uid": "${DS_POSTGRESQL}" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "thresholds" },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [{ "color": "blue", "value": null }]
+          },
+          "unit": "none"
+        },
+        "overrides": []
+      },
+      "gridPos": { "h": 3, "w": 4, "x": 0, "y": 6 },
+      "id": 5,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "textMode": "auto"
+      },
+      "pluginVersion": "10.0.0",
+      "targets": [
+        {
+          "datasource": { "type": "postgres", "uid": "${DS_POSTGRESQL}" },
+          "editorMode": "code",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT COUNT(*) as \"Total Signals\"\nFROM raw_telegram_messages\nWHERE chat_title LIKE CASE WHEN '${channel}' = 'all' THEN '%From The Trenches%' ELSE '${channel}' END\n  AND (raw_text LIKE '%APE SIGNAL DETECTED%'\n       OR raw_text LIKE '%NEW-LAUNCH%'\n       OR raw_text LIKE '%MID-SIZED%')\n  AND message_timestamp >= NOW() - INTERVAL '${time_range}';",
+          "refId": "A"
+        }
+      ],
+      "title": "Total Signals",
+      "type": "stat"
+    },
+    {
+      "datasource": { "type": "postgres", "uid": "${DS_POSTGRESQL}" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "thresholds" },
+          "decimals": 2,
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "red", "value": null },
+              { "color": "yellow", "value": 1 },
+              { "color": "green", "value": 2 }
+            ]
+          },
+          "unit": "x"
+        },
+        "overrides": []
+      },
+      "gridPos": { "h": 3, "w": 4, "x": 4, "y": 6 },
+      "id": 6,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "textMode": "auto"
+      },
+      "pluginVersion": "10.0.0",
+      "targets": [
+        {
+          "datasource": { "type": "postgres", "uid": "${DS_POSTGRESQL}" },
+          "editorMode": "code",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "WITH profit_data AS (\n  SELECT MAX((REGEXP_MATCHES(raw_text, '\\*?\\*?([\\d.]+)\\s*X', 'i'))[1]::FLOAT) as max_mult\n  FROM raw_telegram_messages\n  WHERE raw_text LIKE '%PROFIT ALERT%'\n    AND raw_json->>'reply_to_msg_id' IS NOT NULL\n    AND message_timestamp >= NOW() - INTERVAL '${time_range}'\n  GROUP BY (raw_json->>'reply_to_msg_id')::BIGINT\n)\nSELECT ROUND(AVG(max_mult), 2) as \"Avg Multiplier\"\nFROM profit_data WHERE max_mult > 0;",
+          "refId": "A"
+        }
+      ],
+      "title": "Avg Multiplier",
+      "type": "stat"
+    },
+    {
+      "datasource": { "type": "postgres", "uid": "${DS_POSTGRESQL}" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "thresholds" },
+          "decimals": 1,
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "yellow", "value": 30 },
+              { "color": "red", "value": 50 }
+            ]
+          },
+          "unit": "percent"
+        },
+        "overrides": []
+      },
+      "gridPos": { "h": 3, "w": 4, "x": 8, "y": 6 },
+      "id": 7,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "textMode": "auto"
+      },
+      "pluginVersion": "10.0.0",
+      "targets": [
+        {
+          "datasource": { "type": "postgres", "uid": "${DS_POSTGRESQL}" },
+          "editorMode": "code",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "WITH signals AS (\n  SELECT telegram_message_id, message_timestamp\n  FROM raw_telegram_messages\n  WHERE chat_title LIKE CASE WHEN '${channel}' = 'all' THEN '%From The Trenches%' ELSE '${channel}' END\n    AND (raw_text LIKE '%APE SIGNAL DETECTED%'\n         OR raw_text LIKE '%NEW-LAUNCH%'\n         OR raw_text LIKE '%MID-SIZED%')\n    AND message_timestamp >= NOW() - INTERVAL '${time_range}'\n    AND message_timestamp < NOW() - INTERVAL '3 days'\n),\nprofit_alerts AS (\n  SELECT DISTINCT (raw_json->>'reply_to_msg_id')::BIGINT as reply_to_id\n  FROM raw_telegram_messages WHERE raw_text LIKE '%PROFIT ALERT%'\n)\nSELECT ROUND(\n  COUNT(*) FILTER (WHERE pa.reply_to_id IS NULL)::NUMERIC /\n  NULLIF(COUNT(*), 0) * 100, 1\n) as \"Est. Rugged %\"\nFROM signals s\nLEFT JOIN profit_alerts pa ON pa.reply_to_id = s.telegram_message_id;",
+          "refId": "A"
+        }
+      ],
+      "title": "Est. Rugged %",
+      "type": "stat"
+    },
+    {
+      "datasource": { "type": "postgres", "uid": "${DS_POSTGRESQL}" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "thresholds" },
+          "decimals": 1,
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [{ "color": "orange", "value": null }]
+          },
+          "unit": "x"
+        },
+        "overrides": []
+      },
+      "gridPos": { "h": 3, "w": 4, "x": 12, "y": 6 },
+      "id": 8,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "textMode": "auto"
+      },
+      "pluginVersion": "10.0.0",
+      "targets": [
+        {
+          "datasource": { "type": "postgres", "uid": "${DS_POSTGRESQL}" },
+          "editorMode": "code",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT MAX((REGEXP_MATCHES(raw_text, '\\*?\\*?([\\d.]+)\\s*X', 'i'))[1]::FLOAT) as \"Best Multiplier\"\nFROM raw_telegram_messages\nWHERE raw_text LIKE '%PROFIT ALERT%'\n  AND chat_title LIKE CASE WHEN '${channel}' = 'all' THEN '%From The Trenches%' ELSE '${channel}' END\n  AND message_timestamp >= NOW() - INTERVAL '${time_range}';",
+          "refId": "A"
+        }
+      ],
+      "title": "Best Multiplier",
+      "type": "stat"
+    },
+    {
+      "datasource": { "type": "postgres", "uid": "${DS_POSTGRESQL}" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "thresholds" },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [{ "color": "purple", "value": null }]
+          },
+          "unit": "none"
+        },
+        "overrides": []
+      },
+      "gridPos": { "h": 3, "w": 4, "x": 16, "y": 6 },
+      "id": 9,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "textMode": "auto"
+      },
+      "pluginVersion": "10.0.0",
+      "targets": [
+        {
+          "datasource": { "type": "postgres", "uid": "${DS_POSTGRESQL}" },
+          "editorMode": "code",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT COUNT(*) as \"Profit Alerts\"\nFROM raw_telegram_messages\nWHERE raw_text LIKE '%PROFIT ALERT%'\n  AND chat_title LIKE CASE WHEN '${channel}' = 'all' THEN '%From The Trenches%' ELSE '${channel}' END\n  AND message_timestamp >= NOW() - INTERVAL '${time_range}';",
+          "refId": "A"
+        }
+      ],
+      "title": "Profit Alerts",
+      "type": "stat"
+    },
+    {
+      "collapsed": false,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 9 },
+      "id": 102,
+      "panels": [],
+      "title": "PNL Analysis",
+      "type": "row"
+    },
+    {
+      "datasource": { "type": "postgres", "uid": "${DS_POSTGRESQL}" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "custom": {
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "drawStyle": "line",
+            "fillOpacity": 20,
+            "gradientMode": "none",
+            "hideFrom": { "legend": false, "tooltip": false, "viz": false },
+            "lineInterpolation": "smooth",
+            "lineWidth": 2,
+            "pointSize": 5,
+            "scaleDistribution": { "type": "linear" },
+            "showPoints": "auto",
+            "spanNulls": false,
+            "stacking": { "group": "A", "mode": "none" },
+            "thresholdsStyle": { "mode": "off" }
+          },
+          "mappings": [],
+          "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }] },
+          "unit": "none"
+        },
+        "overrides": []
+      },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 10 },
+      "id": 10,
+      "options": {
+        "legend": { "calcs": [], "displayMode": "list", "placement": "bottom", "showLegend": true },
+        "tooltip": { "mode": "single", "sort": "none" }
+      },
+      "pluginVersion": "10.0.0",
+      "targets": [
+        {
+          "datasource": { "type": "postgres", "uid": "${DS_POSTGRESQL}" },
+          "editorMode": "code",
+          "format": "time_series",
+          "rawQuery": true,
+          "rawSql": "WITH signals AS (\n  SELECT \n    DATE_TRUNC('day', s.message_timestamp) as signal_date,\n    s.telegram_message_id as signal_msg_id\n  FROM raw_telegram_messages s\n  WHERE s.chat_title LIKE CASE WHEN '${channel}' = 'all' THEN '%From The Trenches%' ELSE '${channel}' END\n    AND (s.raw_text LIKE '%APE SIGNAL DETECTED%'\n         OR s.raw_text LIKE '%NEW-LAUNCH%'\n         OR s.raw_text LIKE '%MID-SIZED%')\n    AND s.message_timestamp >= NOW() - INTERVAL '${time_range}'\n),\nprofit_alerts AS (\n  SELECT\n    (p.raw_json->>'reply_to_msg_id')::BIGINT as reply_to_id,\n    MAX((REGEXP_MATCHES(p.raw_text, '\\*?\\*?([\\d.]+)\\s*X', 'i'))[1]::FLOAT) as max_mult\n  FROM raw_telegram_messages p\n  WHERE p.raw_text LIKE '%PROFIT ALERT%'\n    AND p.raw_json->>'reply_to_msg_id' IS NOT NULL\n  GROUP BY (p.raw_json->>'reply_to_msg_id')::BIGINT\n),\ndaily_pnl AS (\n  SELECT \n    s.signal_date,\n    SUM(\n      CASE \n        WHEN pa.max_mult IS NOT NULL THEN (pa.max_mult * 0.95 - 1)\n        ELSE -1\n      END\n    ) as daily_pnl\n  FROM signals s\n  LEFT JOIN profit_alerts pa ON pa.reply_to_id = s.signal_msg_id\n  GROUP BY s.signal_date\n)\nSELECT \n  signal_date as time,\n  SUM(daily_pnl) OVER (ORDER BY signal_date) as \"Cumulative PNL\"\nFROM daily_pnl\nORDER BY signal_date;",
+          "refId": "A"
+        }
+      ],
+      "title": "Cumulative PNL Over Time (Fee-Adjusted)",
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "postgres", "uid": "${DS_POSTGRESQL}" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "custom": {
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "fillOpacity": 80,
+            "gradientMode": "none",
+            "hideFrom": { "legend": false, "tooltip": false, "viz": false },
+            "lineWidth": 1,
+            "scaleDistribution": { "type": "linear" },
+            "thresholdsStyle": { "mode": "off" }
+          },
+          "mappings": [],
+          "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }] }
+        },
+        "overrides": []
+      },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 10 },
+      "id": 11,
+      "options": {
+        "barRadius": 0,
+        "barWidth": 0.8,
+        "groupWidth": 0.7,
+        "legend": { "calcs": [], "displayMode": "list", "placement": "bottom", "showLegend": true },
+        "orientation": "auto",
+        "showValue": "auto",
+        "stacking": "none",
+        "tooltip": { "mode": "single", "sort": "none" },
+        "xTickLabelRotation": 0,
+        "xTickLabelSpacing": 0
+      },
+      "pluginVersion": "10.0.0",
+      "targets": [
+        {
+          "datasource": { "type": "postgres", "uid": "${DS_POSTGRESQL}" },
+          "editorMode": "code",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "WITH multipliers AS (\n  SELECT MAX((REGEXP_MATCHES(raw_text, '\\*?\\*?([\\d.]+)\\s*X', 'i'))[1]::FLOAT) as mult\n  FROM raw_telegram_messages\n  WHERE raw_text LIKE '%PROFIT ALERT%'\n    AND chat_title LIKE CASE WHEN '${channel}' = 'all' THEN '%From The Trenches%' ELSE '${channel}' END\n    AND message_timestamp >= NOW() - INTERVAL '${time_range}'\n    AND raw_json->>'reply_to_msg_id' IS NOT NULL\n  GROUP BY (raw_json->>'reply_to_msg_id')::BIGINT\n)\nSELECT bucket, COUNT(*) as count\nFROM (\n  SELECT \n    CASE \n      WHEN mult < 1.5 THEN '1-1.5X'\n      WHEN mult < 2 THEN '1.5-2X'\n      WHEN mult < 3 THEN '2-3X'\n      WHEN mult < 5 THEN '3-5X'\n      WHEN mult < 10 THEN '5-10X'\n      ELSE '10X+'\n    END as bucket\n  FROM multipliers\n) sub\nGROUP BY bucket\nORDER BY \n  CASE bucket \n    WHEN '1-1.5X' THEN 1\n    WHEN '1.5-2X' THEN 2\n    WHEN '2-3X' THEN 3\n    WHEN '3-5X' THEN 4\n    WHEN '5-10X' THEN 5\n    ELSE 6\n  END;",
+          "refId": "A"
+        }
+      ],
+      "title": "Multiplier Distribution",
+      "type": "barchart"
+    },
+    {
+      "collapsed": false,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 18 },
+      "id": 103,
+      "panels": [],
+      "title": "Signal Activity",
+      "type": "row"
+    },
+    {
+      "datasource": { "type": "postgres", "uid": "${DS_POSTGRESQL}" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "custom": {
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "fillOpacity": 80,
+            "gradientMode": "none",
+            "hideFrom": { "legend": false, "tooltip": false, "viz": false },
+            "lineWidth": 1,
+            "scaleDistribution": { "type": "linear" },
+            "thresholdsStyle": { "mode": "off" }
+          },
+          "mappings": [],
+          "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }] }
+        },
+        "overrides": []
+      },
+      "gridPos": { "h": 6, "w": 12, "x": 0, "y": 19 },
+      "id": 12,
+      "options": {
+        "barRadius": 0,
+        "barWidth": 0.8,
+        "groupWidth": 0.7,
+        "legend": { "calcs": [], "displayMode": "list", "placement": "bottom", "showLegend": true },
+        "orientation": "auto",
+        "showValue": "never",
+        "stacking": "normal",
+        "tooltip": { "mode": "single", "sort": "none" },
+        "xTickLabelRotation": 0,
+        "xTickLabelSpacing": 0
+      },
+      "pluginVersion": "10.0.0",
+      "targets": [
+        {
+          "datasource": { "type": "postgres", "uid": "${DS_POSTGRESQL}" },
+          "editorMode": "code",
+          "format": "time_series",
+          "rawQuery": true,
+          "rawSql": "SELECT \n  DATE_TRUNC('day', message_timestamp) as time,\n  CASE WHEN chat_title LIKE '%VOLUME%' THEN 'VOLSM' ELSE 'MAIN' END as metric,\n  COUNT(*) as value\nFROM raw_telegram_messages\nWHERE (raw_text LIKE '%APE SIGNAL DETECTED%'\n       OR raw_text LIKE '%NEW-LAUNCH%'\n       OR raw_text LIKE '%MID-SIZED%')\n  AND chat_title LIKE CASE WHEN '${channel}' = 'all' THEN '%From The Trenches%' ELSE '${channel}' END\n  AND message_timestamp >= NOW() - INTERVAL '${time_range}'\nGROUP BY DATE_TRUNC('day', message_timestamp), \n  CASE WHEN chat_title LIKE '%VOLUME%' THEN 'VOLSM' ELSE 'MAIN' END\nORDER BY time;",
+          "refId": "A"
+        }
+      ],
+      "title": "Signals Per Day by Channel",
+      "type": "barchart"
+    },
+    {
+      "datasource": { "type": "postgres", "uid": "${DS_POSTGRESQL}" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "custom": {
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "drawStyle": "line",
+            "fillOpacity": 10,
+            "gradientMode": "none",
+            "hideFrom": { "legend": false, "tooltip": false, "viz": false },
+            "lineInterpolation": "smooth",
+            "lineWidth": 2,
+            "pointSize": 5,
+            "scaleDistribution": { "type": "linear" },
+            "showPoints": "auto",
+            "spanNulls": false,
+            "stacking": { "group": "A", "mode": "none" },
+            "thresholdsStyle": { "mode": "line" }
+          },
+          "mappings": [],
+          "max": 100,
+          "min": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "red", "value": null },
+              { "color": "green", "value": 50 }
+            ]
+          },
+          "unit": "percent"
+        },
+        "overrides": []
+      },
+      "gridPos": { "h": 6, "w": 12, "x": 12, "y": 19 },
+      "id": 13,
+      "options": {
+        "legend": { "calcs": [], "displayMode": "list", "placement": "bottom", "showLegend": true },
+        "tooltip": { "mode": "single", "sort": "none" }
+      },
+      "pluginVersion": "10.0.0",
+      "targets": [
+        {
+          "datasource": { "type": "postgres", "uid": "${DS_POSTGRESQL}" },
+          "editorMode": "code",
+          "format": "time_series",
+          "rawQuery": true,
+          "rawSql": "WITH daily_stats AS (\n  SELECT \n    DATE_TRUNC('day', s.message_timestamp) as signal_date,\n    COUNT(*) as total_signals,\n    COUNT(pa.reply_to_id) as winning_signals\n  FROM raw_telegram_messages s\n  LEFT JOIN (\n    SELECT DISTINCT (raw_json->>'reply_to_msg_id')::BIGINT as reply_to_id\n    FROM raw_telegram_messages WHERE raw_text LIKE '%PROFIT ALERT%'\n  ) pa ON pa.reply_to_id = s.telegram_message_id\n  WHERE (s.raw_text LIKE '%APE SIGNAL DETECTED%'\n         OR s.raw_text LIKE '%NEW-LAUNCH%'\n         OR s.raw_text LIKE '%MID-SIZED%')\n    AND s.chat_title LIKE CASE WHEN '${channel}' = 'all' THEN '%From The Trenches%' ELSE '${channel}' END\n    AND s.message_timestamp >= NOW() - INTERVAL '${time_range}'\n  GROUP BY DATE_TRUNC('day', s.message_timestamp)\n)\nSELECT \n  signal_date as time,\n  ROUND(\n    SUM(winning_signals) OVER (ORDER BY signal_date ROWS BETWEEN 6 PRECEDING AND CURRENT ROW)::NUMERIC /\n    NULLIF(SUM(total_signals) OVER (ORDER BY signal_date ROWS BETWEEN 6 PRECEDING AND CURRENT ROW), 0) * 100\n  , 1) as \"7-Day Rolling Win Rate\"\nFROM daily_stats\nORDER BY signal_date;",
+          "refId": "A"
+        }
+      ],
+      "title": "7-Day Rolling Win Rate %",
+      "type": "timeseries"
+    },
+    {
+      "collapsed": false,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 25 },
+      "id": 104,
+      "panels": [],
+      "title": "Performance Tables",
+      "type": "row"
+    },
+    {
+      "datasource": { "type": "postgres", "uid": "${DS_POSTGRESQL}" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "thresholds" },
+          "custom": {
+            "align": "auto",
+            "cellOptions": { "type": "auto" },
+            "inspect": false
+          },
+          "mappings": [],
+          "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }] }
+        },
+        "overrides": [
+          {
+            "matcher": { "id": "byName", "options": "Net PNL %" },
+            "properties": [
+              { "id": "custom.cellOptions", "value": { "type": "color-text" } },
+              {
+                "id": "thresholds",
+                "value": {
+                  "mode": "absolute",
+                  "steps": [
+                    { "color": "red", "value": null },
+                    { "color": "green", "value": 0 }
+                  ]
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 26 },
+      "id": 14,
+      "options": {
+        "cellHeight": "sm",
+        "footer": { "countRows": false, "fields": "", "reducer": ["sum"], "show": false },
+        "showHeader": true,
+        "sortBy": []
+      },
+      "pluginVersion": "10.0.0",
+      "targets": [
+        {
+          "datasource": { "type": "postgres", "uid": "${DS_POSTGRESQL}" },
+          "editorMode": "code",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "WITH signals AS (\n  SELECT \n    telegram_message_id,\n    message_timestamp,\n    (REGEXP_MATCHES(raw_text, 'Token:\\s*-?\\s*\\$(\\w+)', 'i'))[1] as symbol,\n    chat_title\n  FROM raw_telegram_messages\n  WHERE (raw_text LIKE '%APE SIGNAL DETECTED%'\n         OR raw_text LIKE '%NEW-LAUNCH%'\n         OR raw_text LIKE '%MID-SIZED%')\n    AND chat_title LIKE CASE WHEN '${channel}' = 'all' THEN '%From The Trenches%' ELSE '${channel}' END\n    AND message_timestamp >= NOW() - INTERVAL '${time_range}'\n),\nprofits AS (\n  SELECT \n    (raw_json->>'reply_to_msg_id')::BIGINT as signal_id,\n    MAX((REGEXP_MATCHES(raw_text, '\\*?\\*?([\\d.]+)\\s*X', 'i'))[1]::FLOAT) as max_mult\n  FROM raw_telegram_messages\n  WHERE raw_text LIKE '%PROFIT ALERT%'\n  GROUP BY (raw_json->>'reply_to_msg_id')::BIGINT\n)\nSELECT \n  COALESCE(s.symbol, 'Unknown') as \"Token\",\n  ROUND(p.max_mult, 2) as \"Multiplier\",\n  ROUND((p.max_mult * 0.95 - 1) * 100, 1) as \"Net PNL %\",\n  CASE WHEN s.chat_title LIKE '%VOLUME%' THEN 'VOLSM' ELSE 'MAIN' END as \"Channel\",\n  TO_CHAR(s.message_timestamp, 'YYYY-MM-DD HH24:MI') as \"Signal Time\"\nFROM signals s\nJOIN profits p ON p.signal_id = s.telegram_message_id\nORDER BY p.max_mult DESC\nLIMIT 10;",
+          "refId": "A"
+        }
+      ],
+      "title": "Top 10 Winners",
+      "type": "table"
+    },
+    {
+      "datasource": { "type": "postgres", "uid": "${DS_POSTGRESQL}" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "thresholds" },
+          "custom": {
+            "align": "auto",
+            "cellOptions": { "type": "auto" },
+            "inspect": false
+          },
+          "mappings": [],
+          "thresholds": { "mode": "absolute", "steps": [{ "color": "red", "value": null }] }
+        },
+        "overrides": []
+      },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 26 },
+      "id": 15,
+      "options": {
+        "cellHeight": "sm",
+        "footer": { "countRows": false, "fields": "", "reducer": ["sum"], "show": false },
+        "showHeader": true,
+        "sortBy": []
+      },
+      "pluginVersion": "10.0.0",
+      "targets": [
+        {
+          "datasource": { "type": "postgres", "uid": "${DS_POSTGRESQL}" },
+          "editorMode": "code",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "WITH signals AS (\n  SELECT \n    telegram_message_id,\n    message_timestamp,\n    (REGEXP_MATCHES(raw_text, 'Token:\\s*-?\\s*\\$(\\w+)', 'i'))[1] as symbol,\n    chat_title\n  FROM raw_telegram_messages\n  WHERE (raw_text LIKE '%APE SIGNAL DETECTED%'\n         OR raw_text LIKE '%NEW-LAUNCH%'\n         OR raw_text LIKE '%MID-SIZED%')\n    AND chat_title LIKE CASE WHEN '${channel}' = 'all' THEN '%From The Trenches%' ELSE '${channel}' END\n    AND message_timestamp >= NOW() - INTERVAL '${time_range}'\n    AND message_timestamp < NOW() - INTERVAL '3 days'\n),\nprofits AS (\n  SELECT DISTINCT (raw_json->>'reply_to_msg_id')::BIGINT as signal_id\n  FROM raw_telegram_messages WHERE raw_text LIKE '%PROFIT ALERT%'\n)\nSELECT \n  COALESCE(s.symbol, 'Unknown') as \"Token\",\n  'No Profit Alert' as \"Status\",\n  -100 as \"Est. PNL %\",\n  CASE WHEN s.chat_title LIKE '%VOLUME%' THEN 'VOLSM' ELSE 'MAIN' END as \"Channel\",\n  TO_CHAR(s.message_timestamp, 'YYYY-MM-DD HH24:MI') as \"Signal Time\",\n  EXTRACT(DAY FROM NOW() - s.message_timestamp)::INT as \"Days Ago\"\nFROM signals s\nLEFT JOIN profits p ON p.signal_id = s.telegram_message_id\nWHERE p.signal_id IS NULL\nORDER BY s.message_timestamp DESC\nLIMIT 10;",
+          "refId": "A"
+        }
+      ],
+      "title": "Worst 10 - No Profit Alert (Likely Rugged)",
+      "type": "table"
+    },
+    {
+      "collapsed": false,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 34 },
+      "id": 105,
+      "panels": [],
+      "title": "Channel Comparison",
+      "type": "row"
+    },
+    {
+      "datasource": { "type": "postgres", "uid": "${DS_POSTGRESQL}" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "custom": {
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "fillOpacity": 80,
+            "gradientMode": "none",
+            "hideFrom": { "legend": false, "tooltip": false, "viz": false },
+            "lineWidth": 1,
+            "scaleDistribution": { "type": "linear" },
+            "thresholdsStyle": { "mode": "off" }
+          },
+          "mappings": [],
+          "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }] }
+        },
+        "overrides": []
+      },
+      "gridPos": { "h": 6, "w": 24, "x": 0, "y": 35 },
+      "id": 16,
+      "options": {
+        "barRadius": 0,
+        "barWidth": 0.6,
+        "groupWidth": 0.7,
+        "legend": { "calcs": [], "displayMode": "list", "placement": "right", "showLegend": true },
+        "orientation": "horizontal",
+        "showValue": "always",
+        "stacking": "none",
+        "tooltip": { "mode": "single", "sort": "none" },
+        "xTickLabelRotation": 0,
+        "xTickLabelSpacing": 0
+      },
+      "pluginVersion": "10.0.0",
+      "targets": [
+        {
+          "datasource": { "type": "postgres", "uid": "${DS_POSTGRESQL}" },
+          "editorMode": "code",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "WITH channel_stats AS (\n  SELECT \n    CASE WHEN s.chat_title LIKE '%VOLUME%' THEN 'VOLSM' ELSE 'MAIN' END as channel,\n    COUNT(*) as total_signals,\n    COUNT(pa.reply_to_id) as winning_signals\n  FROM raw_telegram_messages s\n  LEFT JOIN (\n    SELECT DISTINCT (raw_json->>'reply_to_msg_id')::BIGINT as reply_to_id\n    FROM raw_telegram_messages WHERE raw_text LIKE '%PROFIT ALERT%'\n  ) pa ON pa.reply_to_id = s.telegram_message_id\n  WHERE (s.raw_text LIKE '%APE SIGNAL DETECTED%'\n         OR s.raw_text LIKE '%NEW-LAUNCH%'\n         OR s.raw_text LIKE '%MID-SIZED%')\n    AND s.message_timestamp >= NOW() - INTERVAL '${time_range}'\n  GROUP BY CASE WHEN s.chat_title LIKE '%VOLUME%' THEN 'VOLSM' ELSE 'MAIN' END\n)\nSELECT \n  channel as \"Channel\",\n  total_signals as \"Total Signals\",\n  winning_signals as \"Winners\",\n  ROUND(winning_signals::NUMERIC / NULLIF(total_signals, 0) * 100, 1) as \"Win Rate %\"\nFROM channel_stats;",
+          "refId": "A"
+        }
+      ],
+      "title": "Channel Performance Comparison",
+      "type": "barchart"
+    }
+  ],
+  "refresh": "30s",
+  "schemaVersion": 38,
+  "style": "dark",
+  "tags": ["trading", "solana", "telegram", "signals"],
+  "templating": {
+    "list": [
+      {
+        "current": { "selected": false, "text": "7d", "value": "7d" },
+        "hide": 0,
+        "includeAll": false,
+        "label": "Time Range",
+        "multi": false,
+        "name": "time_range",
+        "options": [
+          { "selected": false, "text": "1d", "value": "1d" },
+          { "selected": true, "text": "7d", "value": "7d" },
+          { "selected": false, "text": "30d", "value": "30d" },
+          { "selected": false, "text": "90d", "value": "90d" },
+          { "selected": false, "text": "365d", "value": "365d" }
+        ],
+        "query": "1d,7d,30d,90d,365d",
+        "queryValue": "",
+        "skipUrlSync": false,
+        "type": "custom"
+      },
+      {
+        "current": { "selected": false, "text": "all", "value": "all" },
+        "hide": 0,
+        "includeAll": false,
+        "label": "Channel",
+        "multi": false,
+        "name": "channel",
+        "options": [
+          { "selected": true, "text": "All Channels", "value": "all" },
+          { "selected": false, "text": "VOLSM", "value": "From The Trenches - VOLUME + SM" },
+          { "selected": false, "text": "MAIN", "value": "From The Trenches - MAIN" }
+        ],
+        "query": "all,From The Trenches - VOLUME + SM,From The Trenches - MAIN",
+        "queryValue": "",
+        "skipUrlSync": false,
+        "type": "custom"
+      },
+      {
+        "current": { "selected": false, "text": "PostgreSQL", "value": "PostgreSQL" },
+        "hide": 2,
+        "includeAll": false,
+        "label": "Data Source",
+        "multi": false,
+        "name": "DS_POSTGRESQL",
+        "options": [],
+        "query": "postgres",
+        "queryValue": "",
+        "refresh": 1,
+        "regex": "",
+        "skipUrlSync": false,
+        "type": "datasource"
+      }
+    ]
+  },
+  "time": { "from": "now-7d", "to": "now" },
+  "timepicker": {},
+  "timezone": "browser",
+  "title": "Solana Trading Bot Analytics",
+  "uid": "trading-bot-main",
+  "version": 1,
+  "weekStart": ""
+}

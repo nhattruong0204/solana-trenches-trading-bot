@@ -138,15 +138,24 @@ def parse_signal_message(raw_text: str) -> tuple[Optional[str], Optional[str], O
         symbol = symbol_match.group(1)
     
     # Extract token address (Solana base58 - typically 32-44 chars)
-    address_match = re.search(r'[`├└]\s*([1-9A-HJ-NP-Za-km-z]{32,44})', raw_text)
+    # Handles both formats:
+    # - VOLUME+SM: ├ `ADDRESS` or └ `ADDRESS`
+    # - MAIN: ├ **`ADDRESS`** with markdown formatting
+    address_match = re.search(r'[`├└]\s*\*?\*?`?([1-9A-HJ-NP-Za-km-z]{32,44})', raw_text)
     if address_match:
         address = address_match.group(1)
     
-    # Extract FDV: FDV: $XXK or $XX.XK or $XXXK
-    fdv_match = re.search(r'FDV[`:\s]*\$?([\d.]+)\s*K', raw_text, re.IGNORECASE)
+    # Extract FDV: Various formats
+    # - VOLUME+SM: FDV: $XXK or $XX.XK or $XXXK (abbreviated)
+    # - MAIN: FDV: $2,200,000.29 (full number with commas)
+    fdv_match = re.search(r'FDV[`:\s]*\*?\*?\$?([\d,]+\.?\d*)\s*K?', raw_text, re.IGNORECASE)
     if fdv_match:
         try:
-            fdv = float(fdv_match.group(1)) * 1000
+            fdv_str = fdv_match.group(1).replace(',', '')
+            fdv = float(fdv_str)
+            # If it ends with K, multiply by 1000
+            if 'K' in raw_text[fdv_match.start():fdv_match.end() + 2].upper():
+                fdv *= 1000
         except ValueError:
             pass
     
@@ -228,19 +237,60 @@ class SignalDatabase:
     
     Connects to the wallet_tracker PostgreSQL database to query
     historical signals and profit alerts from "From The Trenches" channel.
+    
+    Supports multiple channels with channel-specific display names.
     """
     
-    CHANNEL_NAME = "From The Trenches - VOLUME + SM"
+    # Channel display names (used in database queries)
+    CHANNEL_NAME = "From The Trenches - VOLUME + SM"  # Default/primary channel
+    CHANNEL_NAME_MAIN = "From The Trenches - MAIN"
     
-    def __init__(self, dsn: str) -> None:
+    # Map logical channel IDs to display names
+    CHANNEL_DISPLAY_NAMES = {
+        "volsm": "From The Trenches - VOLUME + SM",
+        "main": "From The Trenches - MAIN",
+    }
+    
+    def __init__(self, dsn: str, channel_id: Optional[str] = None) -> None:
         """
         Initialize database connection.
         
         Args:
             dsn: PostgreSQL connection string
+            channel_id: Logical channel identifier (e.g., 'volsm', 'main').
+                       Defaults to 'volsm' if not specified.
         """
         self._dsn = dsn
         self._pool: Optional[asyncpg.Pool] = None
+        self._channel_id = channel_id or "volsm"
+        # Set the active channel name for queries
+        self._active_channel_name = self.CHANNEL_DISPLAY_NAMES.get(
+            self._channel_id, self.CHANNEL_NAME
+        )
+    
+    @property
+    def active_channel_name(self) -> str:
+        """Get the active channel name used for database queries."""
+        return self._active_channel_name
+    
+    @property
+    def channel_id(self) -> str:
+        """Get the logical channel ID (e.g., 'volsm', 'main')."""
+        return self._channel_id
+    
+    def _get_channel_display_name(self, channel_id: Optional[str]) -> str:
+        """
+        Get display name for a channel ID.
+        
+        Args:
+            channel_id: Logical channel identifier (e.g., 'volsm', 'main')
+            
+        Returns:
+            Display name to use in database queries
+        """
+        if channel_id is None:
+            return self._active_channel_name
+        return self.CHANNEL_DISPLAY_NAMES.get(channel_id, self._active_channel_name)
     
     async def connect(self) -> bool:
         """Establish connection pool."""
@@ -290,17 +340,24 @@ class SignalDatabase:
                     cutoff = datetime.now(timezone.utc) - timedelta(days=days)
                     date_filter = f"AND message_timestamp >= '{cutoff.isoformat()}'"
                 
-                # Get signals
+                # Get signals - use channel-specific patterns
+                if self._channel_id == "main":
+                    # MAIN channel uses NEW-LAUNCH and MID-SIZED signal formats
+                    signal_filter = "(raw_text LIKE '%NEW-LAUNCH%' OR raw_text LIKE '%MID-SIZED%')"
+                else:
+                    # VOLUME+SM channel uses APE SIGNAL DETECTED format
+                    signal_filter = "raw_text LIKE '%APE SIGNAL DETECTED%'"
+
                 signals_query = f'''
                     SELECT id, telegram_message_id, raw_text, message_timestamp
                     FROM raw_telegram_messages
                     WHERE chat_title = $1
-                    AND raw_text LIKE '%APE SIGNAL DETECTED%'
+                    AND {signal_filter}
                     {date_filter}
                     ORDER BY message_timestamp DESC
                 '''
                 
-                signals = await conn.fetch(signals_query, self.CHANNEL_NAME)
+                signals = await conn.fetch(signals_query, self._active_channel_name)
                 
                 if not signals:
                     return []
@@ -330,7 +387,7 @@ class SignalDatabase:
                     AND raw_text LIKE '%PROFIT ALERT%'
                 '''
                 
-                alerts = await conn.fetch(alerts_query, self.CHANNEL_NAME)
+                alerts = await conn.fetch(alerts_query, self._active_channel_name)
                 
                 # Build profit map
                 profit_map: dict[int, list[ProfitAlert]] = {}
@@ -460,13 +517,13 @@ class SignalDatabase:
                     SELECT COUNT(*) FROM raw_telegram_messages
                     WHERE chat_title = $1
                     AND raw_text LIKE '%APE SIGNAL DETECTED%'
-                ''', self.CHANNEL_NAME)
+                ''', self._active_channel_name)
                 
                 alerts = await conn.fetchval('''
                     SELECT COUNT(*) FROM raw_telegram_messages
                     WHERE chat_title = $1
                     AND raw_text LIKE '%PROFIT ALERT%'
-                ''', self.CHANNEL_NAME)
+                ''', self._active_channel_name)
                 
                 return {
                     "total_signals": total or 0,
@@ -486,7 +543,7 @@ class SignalDatabase:
                 result = await conn.fetchval('''
                     SELECT MAX(telegram_message_id) FROM raw_telegram_messages
                     WHERE chat_title = $1
-                ''', self.CHANNEL_NAME)
+                ''', self._active_channel_name)
                 return result
         except Exception as e:
             logger.error(f"Failed to get latest message ID: {e}")
@@ -499,6 +556,7 @@ class SignalDatabase:
         token_address: str,
         signal_time: datetime,
         raw_text: str,
+        channel_name: Optional[str] = None,
     ) -> bool:
         """
         Insert a new signal into the database.
@@ -509,6 +567,8 @@ class SignalDatabase:
             token_address: Token address
             signal_time: Signal timestamp
             raw_text: Raw message text
+            channel_name: Logical channel name (e.g., 'volsm', 'main'). 
+                         If None, uses default CHANNEL_NAME.
             
         Returns:
             True if inserted, False if already exists or failed
@@ -516,13 +576,16 @@ class SignalDatabase:
         if not self._pool:
             return False
         
+        # Map logical channel name to display name
+        display_channel_name = self._get_channel_display_name(channel_name)
+        
         try:
             async with self._pool.acquire() as conn:
                 # Check if already exists
                 exists = await conn.fetchval('''
                     SELECT 1 FROM raw_telegram_messages
                     WHERE chat_title = $1 AND telegram_message_id = $2
-                ''', self.CHANNEL_NAME, message_id)
+                ''', display_channel_name, message_id)
                 
                 if exists:
                     return False
@@ -544,7 +607,7 @@ class SignalDatabase:
                 ''', 
                     message_id,
                     0,  # telegram_chat_id - we don't have it
-                    self.CHANNEL_NAME,
+                    display_channel_name,
                     raw_text,
                     signal_time,
                     0,  # sender_id
@@ -589,7 +652,7 @@ class SignalDatabase:
                 exists = await conn.fetchval('''
                     SELECT 1 FROM raw_telegram_messages
                     WHERE chat_title = $1 AND telegram_message_id = $2
-                ''', self.CHANNEL_NAME, message_id)
+                ''', self._active_channel_name, message_id)
                 
                 if exists:
                     return False
@@ -615,7 +678,7 @@ class SignalDatabase:
                 ''', 
                     message_id,
                     0,  # telegram_chat_id
-                    self.CHANNEL_NAME,
+                    self._active_channel_name,
                     raw_text,
                     raw_json,
                     alert_time,
@@ -778,7 +841,7 @@ class SignalDatabase:
                         AND raw_json IS NULL
                         AND message_timestamp >= $2
                         ORDER BY message_timestamp DESC
-                    ''', self.CHANNEL_NAME, cutoff)
+                    ''', self._active_channel_name, cutoff)
                 else:
                     rows = await conn.fetch('''
                         SELECT id, telegram_message_id, message_timestamp, raw_text
@@ -787,7 +850,7 @@ class SignalDatabase:
                         AND source_bot = 'trenches_sync'
                         AND raw_json IS NULL
                         ORDER BY message_timestamp DESC
-                    ''', self.CHANNEL_NAME)
+                    ''', self._active_channel_name)
                 
                 signals = []
                 for row in rows:
