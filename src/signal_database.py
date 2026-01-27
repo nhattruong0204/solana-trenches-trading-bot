@@ -336,10 +336,19 @@ class SignalDatabase:
                 profit_map: dict[int, list[ProfitAlert]] = {}
                 for a in alerts:
                     try:
-                        json_data = json.loads(a['raw_json']) if a['raw_json'] else {}
-                    except json.JSONDecodeError:
+                        raw_json = a['raw_json']
+                        # Handle JSONB (returned as dict by asyncpg) or TEXT (string)
+                        if raw_json is None:
+                            json_data = {}
+                        elif isinstance(raw_json, dict):
+                            # asyncpg returns JSONB as dict directly
+                            json_data = raw_json
+                        else:
+                            # Fallback: parse as JSON string
+                            json_data = json.loads(raw_json)
+                    except (json.JSONDecodeError, TypeError):
                         continue
-                    
+
                     reply_to = json_data.get('reply_to_msg_id')
                     if not reply_to:
                         continue

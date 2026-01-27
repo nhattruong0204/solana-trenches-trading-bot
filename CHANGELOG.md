@@ -44,6 +44,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `_forward_win_to_public()` now uses raw messages when available, with CTA appended separately
 
 ### Fixed
+- **CRITICAL: `/signalpnl` showing 0 profit alerts (100% loss rate) due to JSONB parsing bug**
+  - Observed: 231 signals found but 0 profit alerts matched, resulting in -100% PNL
+  - Root cause: `raw_json` column is JSONB type, asyncpg returns it as Python dict
+  - But code was using `json.loads()` which expects a string, raising `TypeError`
+  - The `TypeError` was not caught (only `JSONDecodeError` was caught), causing
+    profit alert processing to silently fail
+  - Fix: Check if `raw_json` is already a dict (from JSONB) and use it directly
+  - Location: `src/signal_database.py:339-348` (`get_signals_in_period` method)
+  - Regression tests: `tests/test_signal_database.py::TestJsonbParsing`
+
 - **CRITICAL: Missing methods after PR #6 merge caused bot commands to fail**
   - `/syncsignals`, `/realpnl`, `/signalpnl` commands all crashed with AttributeError
   - Root cause: PR #6 merge lost `_ensure_trading_client_connected()` and `_check_deleted_messages()` methods

@@ -605,12 +605,221 @@ class TestParseFunctions:
 
 class AsyncContextManager:
     """Helper for creating async context managers in tests."""
-    
+
     def __init__(self, value):
         self.value = value
-    
+
     async def __aenter__(self):
         return self.value
-    
+
     async def __aexit__(self, *args):
         pass
+
+
+class TestJsonbParsing:
+    """
+    Regression tests for JSONB raw_json parsing.
+
+    Bug: When raw_json column is JSONB type, asyncpg returns it as a Python dict,
+    not a string. The code was using json.loads() which fails with TypeError
+    when passed a dict. This caused profit alerts to not be matched to signals.
+
+    Fixed in: bugfix/fix-signal-pnl-not-working
+    """
+
+    @pytest.fixture
+    def db_with_signals_and_alerts(self):
+        """Create db with mocked signals and profit alerts."""
+        db = SignalDatabase("postgresql://test:test@localhost:5432/test")
+
+        now = datetime.now(timezone.utc)
+
+        # Mock signals
+        signals = [
+            {
+                'id': 1,
+                'telegram_message_id': 100,
+                'raw_text': 'APE SIGNAL DETECTED Token: - $TEST └ `addr12345678901234567890123456789012` FDV: $50K',
+                'message_timestamp': now - timedelta(hours=24),
+            },
+            {
+                'id': 2,
+                'telegram_message_id': 200,
+                'raw_text': 'APE SIGNAL DETECTED Token: - $COIN └ `addr98765432109876543210987654321098` FDV: $100K',
+                'message_timestamp': now - timedelta(hours=12),
+            },
+        ]
+
+        # Mock profit alerts - raw_json as DICT (how asyncpg returns JSONB)
+        alerts_jsonb = [
+            {
+                'id': 10,
+                'telegram_message_id': 101,
+                'raw_text': 'PROFIT ALERT **2X**',
+                'message_timestamp': now - timedelta(hours=20),
+                'raw_json': {'reply_to_msg_id': 100, 'multiplier': 2.0},  # Dict from JSONB
+            },
+            {
+                'id': 11,
+                'telegram_message_id': 102,
+                'raw_text': 'PROFIT ALERT **3X**',
+                'message_timestamp': now - timedelta(hours=18),
+                'raw_json': {'reply_to_msg_id': 100, 'multiplier': 3.0},  # Dict from JSONB
+            },
+        ]
+
+        mock_conn = AsyncMock()
+
+        async def mock_fetch(query, *args):
+            if 'APE SIGNAL DETECTED' in query:
+                return signals
+            elif 'PROFIT ALERT' in query:
+                return alerts_jsonb
+            return []
+
+        mock_conn.fetch = mock_fetch
+
+        mock_pool = MagicMock()
+        mock_pool.acquire = MagicMock(return_value=AsyncContextManager(mock_conn))
+        db._pool = mock_pool
+
+        return db
+
+    @pytest.mark.asyncio
+    async def test_jsonb_dict_parsing(self, db_with_signals_and_alerts):
+        """
+        Test that raw_json returned as dict (JSONB) is correctly parsed.
+
+        Regression test for: profit alerts not matching signals when raw_json is JSONB.
+        """
+        db = db_with_signals_and_alerts
+
+        results = await db.get_signals_in_period(days=30)
+
+        # Should have 2 signals
+        assert len(results) == 2
+
+        # First signal should have 2 profit alerts matched
+        signal_100 = next((r for r in results if r.signal.telegram_msg_id == 100), None)
+        assert signal_100 is not None
+        assert len(signal_100.profit_alerts) == 2
+        assert signal_100.max_multiplier == 3.0
+
+        # Second signal should have 0 profit alerts
+        signal_200 = next((r for r in results if r.signal.telegram_msg_id == 200), None)
+        assert signal_200 is not None
+        assert len(signal_200.profit_alerts) == 0
+
+    @pytest.fixture
+    def db_with_string_raw_json(self):
+        """Create db with raw_json as string (legacy TEXT column behavior)."""
+        db = SignalDatabase("postgresql://test:test@localhost:5432/test")
+
+        now = datetime.now(timezone.utc)
+
+        signals = [
+            {
+                'id': 1,
+                'telegram_message_id': 100,
+                'raw_text': 'APE SIGNAL DETECTED Token: - $TEST └ `addr12345678901234567890123456789012` FDV: $50K',
+                'message_timestamp': now - timedelta(hours=24),
+            },
+        ]
+
+        # raw_json as STRING (legacy behavior or TEXT column)
+        alerts_text = [
+            {
+                'id': 10,
+                'telegram_message_id': 101,
+                'raw_text': 'PROFIT ALERT **2.5X**',
+                'message_timestamp': now - timedelta(hours=20),
+                'raw_json': '{"reply_to_msg_id": 100, "multiplier": 2.5}',  # String
+            },
+        ]
+
+        mock_conn = AsyncMock()
+
+        async def mock_fetch(query, *args):
+            if 'APE SIGNAL DETECTED' in query:
+                return signals
+            elif 'PROFIT ALERT' in query:
+                return alerts_text
+            return []
+
+        mock_conn.fetch = mock_fetch
+
+        mock_pool = MagicMock()
+        mock_pool.acquire = MagicMock(return_value=AsyncContextManager(mock_conn))
+        db._pool = mock_pool
+
+        return db
+
+    @pytest.mark.asyncio
+    async def test_string_raw_json_parsing(self, db_with_string_raw_json):
+        """
+        Test that raw_json as string (legacy TEXT behavior) still works.
+        """
+        db = db_with_string_raw_json
+
+        results = await db.get_signals_in_period(days=30)
+
+        assert len(results) == 1
+        assert len(results[0].profit_alerts) == 1
+        assert results[0].max_multiplier == 2.5
+
+    @pytest.fixture
+    def db_with_null_raw_json(self):
+        """Create db with null raw_json values."""
+        db = SignalDatabase("postgresql://test:test@localhost:5432/test")
+
+        now = datetime.now(timezone.utc)
+
+        signals = [
+            {
+                'id': 1,
+                'telegram_message_id': 100,
+                'raw_text': 'APE SIGNAL DETECTED Token: - $TEST └ `addr12345678901234567890123456789012`',
+                'message_timestamp': now,
+            },
+        ]
+
+        # Profit alert with null raw_json (should be skipped)
+        alerts = [
+            {
+                'id': 10,
+                'telegram_message_id': 101,
+                'raw_text': 'PROFIT ALERT **2X**',
+                'message_timestamp': now,
+                'raw_json': None,
+            },
+        ]
+
+        mock_conn = AsyncMock()
+
+        async def mock_fetch(query, *args):
+            if 'APE SIGNAL DETECTED' in query:
+                return signals
+            elif 'PROFIT ALERT' in query:
+                return alerts
+            return []
+
+        mock_conn.fetch = mock_fetch
+
+        mock_pool = MagicMock()
+        mock_pool.acquire = MagicMock(return_value=AsyncContextManager(mock_conn))
+        db._pool = mock_pool
+
+        return db
+
+    @pytest.mark.asyncio
+    async def test_null_raw_json_handled(self, db_with_null_raw_json):
+        """
+        Test that null raw_json is handled gracefully (alert skipped).
+        """
+        db = db_with_null_raw_json
+
+        results = await db.get_signals_in_period(days=30)
+
+        assert len(results) == 1
+        # Alert should be skipped due to null raw_json (no reply_to_msg_id)
+        assert len(results[0].profit_alerts) == 0
