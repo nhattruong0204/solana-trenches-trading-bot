@@ -908,18 +908,23 @@ class MainTrackerBot:
         
         await self._send_to_admin(header_message)
         
-        # Top winners
-        top_5_winners = [tr for tr in token_results if tr['sol_profit'] > 0][:5]
-        if top_5_winners:
-            winners_text = "🏆 *Top 5 Winners*\n\n"
-            for i, tr in enumerate(top_5_winners, 1):
+        # All winners (sorted by profit)
+        all_winners = [tr for tr in token_results if tr['sol_profit'] > 0]
+        if all_winners:
+            winners_text = f"🏆 *All Winners ({len(all_winners)} tokens)*\n\n"
+            for i, tr in enumerate(all_winners, 1):
                 s = tr['signal']
                 deleted_mark = "🗑️ " if tr['is_deleted'] else ""
                 winners_text += (
                     f"{i}. {deleted_mark}${s.signal.token_symbol} - "
                     f"`{tr['multiplier']:.1f}x` = `{tr['sol_profit']:+.2f}` SOL\n"
                 )
-            await self._send_to_admin(winners_text)
+                # Split into multiple messages if too long (Telegram limit ~4096 chars)
+                if len(winners_text) > 3500:
+                    await self._send_to_admin(winners_text)
+                    winners_text = ""
+            if winners_text:
+                await self._send_to_admin(winners_text)
         
         # Back to menu button
         await self._send_to_admin(
@@ -1094,11 +1099,11 @@ class MainTrackerBot:
         
         await self._send_to_admin(header_message)
         
-        # Top winners
-        top_5_winners = [tr for tr in token_results if tr['sol_profit'] > 0][:5]
-        if top_5_winners:
-            winners_text = "🏆 *Top 5 Winners*\n\n"
-            for i, tr in enumerate(top_5_winners, 1):
+        # All winners (sorted by profit)
+        all_winners = [tr for tr in token_results if tr['sol_profit'] > 0]
+        if all_winners:
+            winners_text = f"🏆 *All Winners ({len(all_winners)} tokens)*\n\n"
+            for i, tr in enumerate(all_winners, 1):
                 r = tr['result']
                 deleted_mark = "🗑️ " if tr['is_deleted'] else ""
                 mult = r.multiplier if r.multiplier else 0
@@ -1106,7 +1111,12 @@ class MainTrackerBot:
                     f"{i}. {deleted_mark}${r.signal.token_symbol} - "
                     f"`{mult:.1f}x` = `{tr['sol_profit']:+.2f}` SOL\n"
                 )
-            await self._send_to_admin(winners_text)
+                # Split into multiple messages if too long (Telegram limit ~4096 chars)
+                if len(winners_text) > 3500:
+                    await self._send_to_admin(winners_text)
+                    winners_text = ""
+            if winners_text:
+                await self._send_to_admin(winners_text)
         
         await self._send_to_admin(
             "Use /menu to return to main menu.",
