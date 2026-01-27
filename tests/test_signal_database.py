@@ -587,6 +587,12 @@ class TestParseFunctions:
         
         # With Multiplier label
         assert parse_profit_alert("Multiplier: 3X") == 3.0
+        
+        # NEW: Simple format like "3.0X profit alert" (lowercase)
+        assert parse_profit_alert("3.0X profit alert") == 3.0
+        assert parse_profit_alert("48.0X profit alert") == 48.0
+        assert parse_profit_alert("5.0X profit alert") == 5.0
+        assert parse_profit_alert("42.0X profit alert") == 42.0
     
     def test_parse_fdv_from_profit_alert_various(self):
         """Test parsing FDV from profit alerts."""
