@@ -16,6 +16,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 -->
 
 ### Added
+- **Grafana Analytics Dashboard** (`grafana/`)
+  - Professional trading analytics dashboard for visualizing bot performance
+  - Auto-provisioned via Docker Compose with PostgreSQL datasource
+  - Health check panels: Signal PNL %, Win Rate %, Signals Today, Last Signal Age
+  - KPI panels: Total Signals, Avg Multiplier, Est. Rugged %, Best Multiplier
+  - Time-series: Cumulative PNL Over Time, 7-Day Rolling Win Rate
+  - Tables: Top 10 Winners, Worst 10 Losers (likely rugged)
+  - Channel comparison: VOLSM vs MAIN side-by-side stats
+  - Dashboard filters: Time range (1d, 7d, 30d, 90d, 365d), Channel (All, VOLSM, MAIN)
+  - Fee-adjusted PNL calculations (2.5% buy + 2.5% sell)
+  - New Docker Compose service: `grafana` (port 3000)
+  - New environment variable: `GRAFANA_ADMIN_PASSWORD`
+  - Performance indexes added to `init-db.sql` for dashboard queries
+  - Documentation: `docs/GRAFANA.md`
+
 - **MAIN Channel Separate Tracker Bot** (`main_tracker.py`, `src/main_tracker_bot.py`)
   - New standalone bot to track signals from @fttrenches_sol (MAIN channel)
   - Does NOT execute trades - signal tracking and PnL analysis only
