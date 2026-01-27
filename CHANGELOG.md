@@ -89,6 +89,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `_forward_win_to_public()` now uses raw messages when available, with CTA appended separately
 
 ### Fixed
+- **CRITICAL: `/signalpnl` and `/realpnl` showing 0 profit alerts (100% loss rate)**
+  - Observed: 231 signals found but 0 profit alerts matched, resulting in -100% PnL
+  - Root cause 1: SQL query used case-sensitive `LIKE '%PROFIT ALERT%'` but new channel
+    format uses lowercase: `'3.0X profit alert'`, `'48.0X profit alert'`
+  - Root cause 2: `raw_json` column is JSONB type, asyncpg returns it as Python dict,
+    but code was using `json.loads()` which expects a string, raising TypeError
+  - Root cause 3: `parse_profit_alert()` regex didn't match new simple format `'3.0X profit alert'`
+  - Fix: Changed `LIKE '%PROFIT ALERT%'` to `ILIKE '%profit alert%'` (case-insensitive)
+  - Fix: Check if `raw_json` is already a dict (from JSONB) and use it directly
+  - Fix: Added new regex pattern `^([\d.]+)\s*X\s+profit\s+alert` for simple format
+  - Location: `src/signal_database.py` lines 367-389 (queries), 156-189 (parse_profit_alert)
+  - Regression tests: `tests/test_signal_database.py::TestJsonbParsing`, `test_parse_profit_alert_various_formats`
+  
 - **CRITICAL: Missing methods after PR #6 merge caused bot commands to fail**
   - `/syncsignals`, `/realpnl`, `/signalpnl` commands all crashed with AttributeError
   - Root cause: PR #6 merge lost `_ensure_trading_client_connected()` and `_check_deleted_messages()` methods
