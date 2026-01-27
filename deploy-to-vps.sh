@@ -69,6 +69,8 @@ main() {
         --exclude='node_modules' \
         --exclude='.pytest_cache' \
         --exclude='trading_state.json' \
+        --exclude='*.session' \
+        --exclude='*.session-journal' \
         .
 
     print_step "Transferring files to VPS..."
@@ -76,10 +78,10 @@ main() {
     # Create remote directory
     ssh ${SSH_OPTS} ${VPS_USER}@${VPS_IP} "mkdir -p ${REMOTE_DIR}/data"
 
-    # Transfer files
+    # Transfer files (excluding session files - they're created on VPS)
     scp ${SSH_OPTS} /tmp/trading-bot-deploy.tar.gz ${VPS_USER}@${VPS_IP}:${REMOTE_DIR}/
     scp ${SSH_OPTS} .env ${VPS_USER}@${VPS_IP}:${REMOTE_DIR}/
-    scp ${SSH_OPTS} wallet_tracker_session.session ${VPS_USER}@${VPS_IP}:${REMOTE_DIR}/
+    # NOTE: Session files are NOT transferred - they must be created on VPS to avoid IP conflicts
 
     # Setup on VPS
     print_step "Setting up on VPS..."

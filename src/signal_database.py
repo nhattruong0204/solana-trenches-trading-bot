@@ -158,7 +158,20 @@ def parse_profit_alert(raw_text: str) -> Optional[float]:
     Parse a profit alert message to extract multiplier.
     
     Returns: multiplier (e.g., 6.0 for 6X)
+    
+    Handles formats:
+    - "3.0X profit alert" (new simple format)
+    - "**2X**", "**3X**" (markdown format)
+    - "Multiplier: 6.00X" (detailed format)
     """
+    # NEW: Simple format like "3.0X profit alert" or "48.0X profit alert"
+    simple_match = re.search(r'^([\d.]+)\s*X\s+profit\s+alert', raw_text, re.IGNORECASE)
+    if simple_match:
+        try:
+            return float(simple_match.group(1))
+        except ValueError:
+            pass
+    
     # Match patterns like: **2X**, **3X**, **6X**, **10X**, **1.5X**
     multiplier_match = re.search(r'\*\*?([\d.]+)\s*X\*?\*?', raw_text, re.IGNORECASE)
     if multiplier_match:
@@ -167,7 +180,7 @@ def parse_profit_alert(raw_text: str) -> Optional[float]:
         except ValueError:
             pass
     
-    # Alternative pattern without markdown
+    # Alternative pattern: Multiplier: 6.00X
     multiplier_match2 = re.search(r'Multiplier[:\s`]*([\d.]+)\s*X', raw_text, re.IGNORECASE)
     if multiplier_match2:
         try:
@@ -322,12 +335,12 @@ class SignalDatabase:
                     )
                     signal_map[s['telegram_message_id']] = signal
                 
-                # Get profit alerts
+                # Get profit alerts (use ILIKE for case-insensitive match)
                 alerts_query = '''
                     SELECT id, telegram_message_id, raw_text, message_timestamp, raw_json
                     FROM raw_telegram_messages
                     WHERE chat_title = $1
-                    AND raw_text LIKE '%PROFIT ALERT%'
+                    AND raw_text ILIKE '%profit alert%'
                 '''
                 
                 alerts = await conn.fetch(alerts_query, self.CHANNEL_NAME)
@@ -336,10 +349,19 @@ class SignalDatabase:
                 profit_map: dict[int, list[ProfitAlert]] = {}
                 for a in alerts:
                     try:
-                        json_data = json.loads(a['raw_json']) if a['raw_json'] else {}
-                    except json.JSONDecodeError:
+                        raw_json = a['raw_json']
+                        # Handle JSONB (returned as dict by asyncpg) or TEXT (string)
+                        if raw_json is None:
+                            json_data = {}
+                        elif isinstance(raw_json, dict):
+                            # asyncpg returns JSONB as dict directly
+                            json_data = raw_json
+                        else:
+                            # Fallback: parse as JSON string
+                            json_data = json.loads(raw_json)
+                    except (json.JSONDecodeError, TypeError):
                         continue
-                    
+
                     reply_to = json_data.get('reply_to_msg_id')
                     if not reply_to:
                         continue
@@ -465,7 +487,7 @@ class SignalDatabase:
                 alerts = await conn.fetchval('''
                     SELECT COUNT(*) FROM raw_telegram_messages
                     WHERE chat_title = $1
-                    AND raw_text LIKE '%PROFIT ALERT%'
+                    AND raw_text ILIKE '%profit alert%'
                 ''', self.CHANNEL_NAME)
                 
                 return {
