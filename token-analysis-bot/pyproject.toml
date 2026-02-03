@@ -1,0 +1,95 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "token-analysis-bot"
+version = "0.1.0"
+description = "Automated token analysis and research bot for Base chain with Telegram delivery"
+readme = "README.md"
+requires-python = ">=3.11"
+license = {text = "MIT"}
+authors = [
+    {name = "Token Analysis Team"}
+]
+keywords = ["crypto", "token", "analysis", "telegram", "base", "blockchain"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+]
+
+dependencies = [
+    # Core
+    "pydantic>=2.5.0",
+    "pydantic-settings>=2.1.0",
+    "python-dotenv>=1.0.0",
+
+    # Async
+    "asyncio>=3.4.3",
+    "aiohttp>=3.9.0",
+    "httpx>=0.25.0",
+
+    # Blockchain
+    "web3>=6.11.0",
+
+    # Telegram
+    "python-telegram-bot>=20.7",
+    "telethon>=1.32.0",
+
+    # Database
+    "asyncpg>=0.29.0",
+    "sqlalchemy>=2.0.0",
+
+    # LLM
+    "anthropic>=0.18.0",
+    "openai>=1.6.0",
+
+    # Twitter/X
+    "tweepy>=4.14.0",
+
+    # Utilities
+    "rich>=13.7.0",
+    "structlog>=23.2.0",
+    "tenacity>=8.2.0",
+    "cachetools>=5.3.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.4.0",
+    "pytest-asyncio>=0.23.0",
+    "pytest-cov>=4.1.0",
+    "mypy>=1.7.0",
+    "ruff>=0.1.0",
+    "black>=23.0.0",
+    "pre-commit>=3.5.0",
+]
+
+[project.scripts]
+token-analyzer = "src.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["src*"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+addopts = "-v --tb=short"
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+ignore_missing_imports = true
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+select = ["E", "F", "I", "N", "W", "UP"]
+
+[tool.black]
+line-length = 100
+target-version = ["py311"]

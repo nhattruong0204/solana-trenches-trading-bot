@@ -1,0 +1,40 @@
+# Core
+pydantic>=2.5.0
+pydantic-settings>=2.1.0
+python-dotenv>=1.0.0
+
+# Async
+aiohttp>=3.9.0
+httpx>=0.25.0
+
+# Blockchain
+web3>=6.11.0
+
+# Telegram
+python-telegram-bot>=20.7
+telethon>=1.32.0
+
+# Database
+asyncpg>=0.29.0
+sqlalchemy>=2.0.0
+
+# LLM
+anthropic>=0.18.0
+openai>=1.6.0
+
+# Twitter/X
+tweepy>=4.14.0
+
+# Utilities
+rich>=13.7.0
+structlog>=23.2.0
+tenacity>=8.2.0
+cachetools>=5.3.0
+
+# Dev dependencies
+pytest>=7.4.0
+pytest-asyncio>=0.23.0
+pytest-cov>=4.1.0
+mypy>=1.7.0
+ruff>=0.1.0
+black>=23.0.0
