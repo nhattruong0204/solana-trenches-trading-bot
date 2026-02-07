@@ -32,4 +32,20 @@ python main.py
 python main.py --live
 ```
 
-See [README_TRADING_BOT.md](README_TRADING_BOT.md) for full documentation.
+## Documentation
+
+### For Users
+- [README_TRADING_BOT.md](README_TRADING_BOT.md) - Full trading bot documentation
+- [FEATURES.md](FEATURES.md) - Complete feature reference
+- [QUICKSTART.md](QUICKSTART.md) - Quick start guide
+- [WALKTHROUGH.md](WALKTHROUGH.md) - Step-by-step walkthrough
+
+### For Developers
+- [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) - System architecture and components
+- [docs/CONVENTIONS.md](docs/CONVENTIONS.md) - Code style and conventions
+
+### For Building Telegram Bots
+- [docs/COPILOT_TELEGRAM_QUICK_START.md](docs/COPILOT_TELEGRAM_QUICK_START.md) - Quick start for Copilot agents
+- [docs/TELEGRAM_BOT_GUIDE.md](docs/TELEGRAM_BOT_GUIDE.md) - Comprehensive Telegram bot patterns
+
+These guides document the Telegram bot patterns used in this repository and help developers (including Copilot agents) replicate similar functionality.
