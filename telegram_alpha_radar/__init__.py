@@ -1,3 +1,3 @@
-"""Telegram Alpha Radar - Trending token detection from Telegram messages."""
+"""Telegram Alpha Radar — Multi-chain trending token detection system."""
 
-__version__ = "1.0.0"
+__version__ = "2.0.0"

@@ -1,169 +1,302 @@
-# Telegram Alpha Radar
+# Telegram Alpha Radar v2.0
 
-A production-ready Telegram monitoring system that detects trending token contract addresses across your Telegram chats, groups, and channels.
+**Production-ready, multi-chain trending token detection system** that monitors all your Telegram messages in real-time and alerts you when tokens start trending.
 
-## Features
-
-- **User Account Listener** — Connects via Telethon (MTProto) to monitor all incoming messages
-- **Contract Detection** — Regex-based extraction of Solana (Base58) and EVM (0x) addresses with false-positive filtering
-- **PostgreSQL Storage** — Async persistence via asyncpg with deduplication and time-window indexing
-- **Trending Detection** — Configurable thresholds for mention count, unique chats, and velocity scoring
-- **Alert Notifications** — Formatted alerts sent to Telegram Saved Messages with cooldown protection
-- **Dexscreener Integration** — Optional liquidity validation to filter low-liquidity tokens
-- **Prometheus Metrics** — Optional metrics endpoint for monitoring
-- **Graceful Shutdown** — Signal handling for clean teardown
-
-## Project Structure
+## Architecture
 
 ```
 telegram_alpha_radar/
-├── __init__.py       # Package metadata
-├── app.py            # Main entry point & orchestrator
-├── config.py         # Environment-based configuration
-├── listener.py       # Telethon message listener
-├── parser.py         # Contract address detection
-├── storage.py        # PostgreSQL storage layer
-├── trending.py       # Trending detection logic
-├── notifier.py       # Alert notification system
-├── requirements.txt  # Python dependencies
-├── Dockerfile        # Container build
-├── .env.example      # Example environment file
-└── README.md         # This file
+├── app.py                          # Main orchestrator + CLI
+├── config.py                       # Environment-based configuration
+├── core/
+│   ├── models.py                   # Domain models (TokenMatch, TrendingToken, etc.)
+│   ├── types.py                    # Chain enum, type aliases
+│   └── utils.py                    # Logging setup, UTC helpers
+├── detectors/
+│   ├── base_detector.py            # ABC — implement to add new chains
+│   ├── solana_detector.py          # Base58, 32-44 chars, false-positive filtering
+│   └── evm_detector.py             # 0x + 40 hex, normalized lowercase
+├── listener/
+│   └── telegram_listener.py        # Telethon MTProto user session
+├── storage/
+│   ├── base_repository.py          # ABC — swap PostgreSQL for Redis, SQLite, etc.
+│   └── postgres_repository.py      # asyncpg with connection pooling
+├── trending/
+│   └── trending_engine.py          # Scoring, velocity, Dexscreener filter
+├── notifier/
+│   └── telegram_notifier.py        # Alerts to Saved Messages with cooldown
+├── schema.sql                      # Database initialization script
+├── requirements.txt                # Python dependencies
+├── Dockerfile                      # Production container
+└── .env.example                    # Configuration template
 ```
+
+## Features
+
+- **Multi-chain detection**: Solana + EVM with pluggable detector pattern
+- **Telethon user session**: Monitors private chats, groups, and channels
+- **PostgreSQL storage**: Deduplication, time-window queries, connection pooling
+- **Trending engine**: Configurable thresholds, velocity scoring, per-chain ranking
+- **Alert notifications**: Formatted messages to Telegram Saved Messages
+- **Dexscreener integration**: Optional liquidity validation
+- **Prometheus metrics**: `/metrics` endpoint on port 9090
+- **Health check**: `/health` endpoint on port 8080
+- **CLI flags**: `--debug`, `--dry-run`
+- **Graceful shutdown**: SIGINT/SIGTERM handlers
+- **Extensible**: Add new chains in ~50 lines
+
+## Scoring Formula
+
+```
+score = mentions × 2 + unique_chats × 3 + velocity × 5
+```
+
+Where velocity = `(current_mentions - previous_window_mentions) / previous_window_mentions`.
+For first-time appearances, velocity = current mention count.
 
 ## Prerequisites
 
 - Python 3.11+
 - PostgreSQL 14+
-- Telegram API credentials from [my.telegram.org](https://my.telegram.org/apps)
+- Telegram API credentials from https://my.telegram.org/apps
 
-## Setup
+## Quick Start (Local)
 
-### 1. Clone and install dependencies
+### 1. Clone and install
 
 ```bash
 cd telegram_alpha_radar
 pip install -r requirements.txt
 ```
 
-### 2. Configure environment
+### 2. Set up PostgreSQL
+
+```bash
+sudo -u postgres psql -c "CREATE USER radar WITH PASSWORD 'your_password';"
+sudo -u postgres psql -c "CREATE DATABASE alpha_radar OWNER radar;"
+psql -U radar -d alpha_radar -f schema.sql
+```
+
+### 3. Configure environment
 
 ```bash
 cp .env.example .env
-# Edit .env with your credentials
+nano .env  # Fill in your Telegram credentials and DB password
 ```
 
-### 3. Set up PostgreSQL
-
-```bash
-createdb alpha_radar
-# The app auto-creates tables on first run
-```
-
-### 4. First-time Telegram login
-
-On first run, Telethon will prompt you for a verification code sent to your Telegram account. Run interactively:
+### 4. First run (creates Telegram session)
 
 ```bash
 python -m telegram_alpha_radar.app
 ```
 
-This creates a `.session` file. Subsequent runs will use the saved session.
+You'll be prompted to enter your Telegram verification code once.
+After that, the session file is saved and auto-reused.
 
-## Running
-
-### Local
+### 5. Run with options
 
 ```bash
-# Standard mode
-python -m telegram_alpha_radar.app
-
 # Debug mode
 python -m telegram_alpha_radar.app --debug
+
+# Dry run (log alerts without sending)
+python -m telegram_alpha_radar.app --dry-run
 ```
 
-### Docker
+## VPS Deployment
+
+### 1. Server setup (Ubuntu 22.04+)
 
 ```bash
-# Build
-docker build -t alpha-radar -f telegram_alpha_radar/Dockerfile .
+# Update system
+apt update && apt upgrade -y
 
-# Run (interactive for first login)
-docker run -it --env-file telegram_alpha_radar/.env alpha-radar
+# Install PostgreSQL
+apt install -y postgresql postgresql-contrib
 
-# Run (detached, after session is saved)
-docker run -d \
-  --name alpha-radar \
-  --env-file telegram_alpha_radar/.env \
-  -v ./alpha_radar.session:/app/alpha_radar.session \
-  -p 9090:9090 \
-  --restart unless-stopped \
-  alpha-radar
+# Install Python 3.12
+apt install -y python3.12 python3.12-venv python3-pip
+
+# Create app directory
+mkdir -p /opt/alpha-radar
+cd /opt/alpha-radar
 ```
 
-### VPS Deployment
+### 2. Upload code
 
-1. SSH into your VPS
-2. Install Python 3.11+, PostgreSQL, and pip
-3. Clone the repository
-4. Install dependencies: `pip install -r telegram_alpha_radar/requirements.txt`
-5. Copy and configure `.env`
-6. Create the database: `createdb alpha_radar`
-7. Run interactively once to authenticate with Telegram
-8. Use systemd or Docker for persistent execution:
+```bash
+# From your local machine:
+scp -r telegram_alpha_radar/ root@YOUR_VPS_IP:/opt/alpha-radar/
+```
 
-```ini
-# /etc/systemd/system/alpha-radar.service
+### 3. Set up virtual environment
+
+```bash
+cd /opt/alpha-radar
+python3.12 -m venv venv
+source venv/bin/activate
+pip install -r telegram_alpha_radar/requirements.txt
+```
+
+### 4. Set up database
+
+```bash
+sudo -u postgres psql -c "CREATE USER radar WITH PASSWORD 'STRONG_PASSWORD_HERE';"
+sudo -u postgres psql -c "CREATE DATABASE alpha_radar OWNER radar;"
+sudo -u postgres psql -U radar -d alpha_radar -f telegram_alpha_radar/schema.sql
+```
+
+### 5. Configure
+
+```bash
+cp telegram_alpha_radar/.env.example telegram_alpha_radar/.env
+nano telegram_alpha_radar/.env
+```
+
+### 6. Create Telegram session (interactive, one-time)
+
+```bash
+cd /opt/alpha-radar
+source venv/bin/activate
+python -m telegram_alpha_radar.app
+# Enter verification code when prompted, then Ctrl+C
+```
+
+### 7. Create systemd service
+
+```bash
+cat > /etc/systemd/system/alpha-radar.service << 'EOF'
 [Unit]
 Description=Telegram Alpha Radar
 After=network.target postgresql.service
 
 [Service]
 Type=simple
-User=deploy
+User=root
 WorkingDirectory=/opt/alpha-radar
-EnvironmentFile=/opt/alpha-radar/.env
+Environment=PATH=/opt/alpha-radar/venv/bin
 ExecStart=/opt/alpha-radar/venv/bin/python -m telegram_alpha_radar.app
 Restart=always
 RestartSec=10
 
 [Install]
 WantedBy=multi-user.target
+EOF
+
+systemctl daemon-reload
+systemctl enable alpha-radar
+systemctl start alpha-radar
 ```
 
+### 8. Monitor
+
 ```bash
-sudo systemctl enable --now alpha-radar
+# View logs
+journalctl -u alpha-radar -f
+
+# Check status
+systemctl status alpha-radar
+
+# Health check
+curl http://localhost:8080/health
+```
+
+## Docker Deployment
+
+### Build and run
+
+```bash
+cd telegram_alpha_radar
+
+# Build
+docker build -t alpha-radar .
+
+# Run (first time — interactive for Telegram auth)
+docker run -it \
+  --env-file .env \
+  -v $(pwd)/sessions:/app/sessions \
+  -p 8080:8080 \
+  -p 9090:9090 \
+  alpha-radar
+
+# Run (after session created — background)
+docker run -d \
+  --name alpha-radar \
+  --env-file .env \
+  --restart unless-stopped \
+  -v $(pwd)/sessions:/app/sessions \
+  -p 8080:8080 \
+  -p 9090:9090 \
+  alpha-radar
+```
+
+## Adding a New Chain
+
+1. Create `telegram_alpha_radar/detectors/mychain_detector.py`:
+
+```python
+from telegram_alpha_radar.detectors.base_detector import BaseDetector
+from telegram_alpha_radar.core.models import TokenMatch
+
+class MyChainDetector(BaseDetector):
+    @property
+    def chain_name(self) -> str:
+        return "mychain"
+
+    async def detect(self, message, chat_id, message_id):
+        # Your regex / detection logic here
+        return matches
+```
+
+2. Add the chain to `core/types.py`:
+```python
+class Chain(str, Enum):
+    MYCHAIN = "mychain"
+```
+
+3. Register in `app.py`:
+```python
+self._detectors = [
+    SolanaDetector(),
+    EvmDetector(),
+    MyChainDetector(),  # <-- add here
+]
+```
+
+## Running Tests
+
+```bash
+pip install pytest pytest-asyncio
+pytest tests/test_detectors.py -v
 ```
 
 ## Configuration Reference
 
 | Variable | Default | Description |
-|---|---|---|
-| `TELEGRAM_API_ID` | (required) | Telegram API ID |
-| `TELEGRAM_API_HASH` | (required) | Telegram API hash |
-| `TELEGRAM_PHONE` | (required) | Phone number for login |
+|----------|---------|-------------|
+| `TELEGRAM_API_ID` | — | Telegram API ID |
+| `TELEGRAM_API_HASH` | — | Telegram API hash |
+| `TELEGRAM_PHONE` | — | Phone number with country code |
 | `TELEGRAM_SESSION_NAME` | `alpha_radar` | Session file name |
 | `DB_HOST` | `localhost` | PostgreSQL host |
 | `DB_PORT` | `5432` | PostgreSQL port |
-| `DB_USER` | `postgres` | PostgreSQL user |
-| `DB_PASSWORD` | (required) | PostgreSQL password |
-| `DB_NAME` | `alpha_radar` | Database name |
-| `WINDOW_MINUTES` | `5` | Trending detection window |
-| `MIN_MENTIONS` | `3` | Minimum mentions to trend |
-| `MIN_UNIQUE_CHATS` | `2` | Minimum distinct chats |
-| `ALERT_COOLDOWN_MINUTES` | `15` | Cooldown between repeat alerts |
+| `DB_USER` | `radar` | PostgreSQL user |
+| `DB_PASSWORD` | — | PostgreSQL password |
+| `DB_NAME` | `alpha_radar` | PostgreSQL database |
+| `DB_POOL_MIN` | `2` | Min pool connections |
+| `DB_POOL_MAX` | `10` | Max pool connections |
+| `TRENDING_WINDOW_MINUTES` | `5` | Detection time window |
+| `TRENDING_MIN_MENTIONS` | `3` | Min mentions to trend |
+| `TRENDING_MIN_UNIQUE_CHATS` | `2` | Min unique chats to trend |
+| `TRENDING_COOLDOWN_MINUTES` | `15` | Alert cooldown |
 | `TRENDING_CHECK_INTERVAL` | `30` | Seconds between trending checks |
-| `DEXSCREENER_ENABLED` | `false` | Enable liquidity filtering |
-| `MIN_LIQUIDITY_USD` | `20000` | Minimum liquidity threshold |
+| `FILTER_MIN_MSG_LENGTH` | `5` | Minimum message length |
+| `FILTER_IGNORE_FORWARDED` | `false` | Skip forwarded messages |
+| `DEXSCREENER_ENABLED` | `false` | Enable liquidity filter |
+| `DEXSCREENER_MIN_LIQUIDITY` | `1000` | Min USD liquidity |
 | `METRICS_ENABLED` | `false` | Enable Prometheus metrics |
-| `METRICS_PORT` | `9090` | Metrics HTTP port |
+| `METRICS_PORT` | `9090` | Prometheus port |
+| `HEALTH_ENABLED` | `true` | Enable health endpoint |
+| `HEALTH_PORT` | `8080` | Health check port |
 | `LOG_LEVEL` | `INFO` | Logging level |
-| `DEBUG` | `false` | Debug mode |
-
-## Scoring Formula
-
-```
-score = mention_count * unique_chats * (1 + velocity_ratio)
-```
-
-Where `velocity_ratio = (current_window_mentions - previous_window_mentions) / previous_window_mentions`. Tokens appearing for the first time get a velocity equal to their mention count.
+| `LOG_JSON` | `false` | JSON structured logging |

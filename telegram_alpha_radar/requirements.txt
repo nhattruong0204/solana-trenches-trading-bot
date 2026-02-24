@@ -1,4 +1,4 @@
-# Telegram Alpha Radar dependencies
+# Telegram Alpha Radar — dependencies
 telethon>=1.36.0
 asyncpg>=0.29.0
 aiohttp>=3.9.0
@@ -6,3 +6,7 @@ python-dotenv>=1.0.0
 
 # Optional: Prometheus metrics
 prometheus-client>=0.20.0
+
+# Testing
+pytest>=8.0.0
+pytest-asyncio>=0.23.0
